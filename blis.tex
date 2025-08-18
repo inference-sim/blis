@@ -36,18 +36,18 @@ inference platforms like sglang in Section \ref{sec:future-work}.
 \label{subsec:vllm-overview}
 We will focus on handling of an inference request by vLLM. vLLM
 has two main components: the API server and the engine core; these operate as separate threads and
-communicate through a scheduling queue.
+communicate through a message queue.
 
 \paragraph{API server thread.}
 The API server is implemented using FastAPI. Its role is to handle client-facing tasks without blocking on actual model execution.
 The API thread is responsible for:
 \begin{enumerate}
     \item Receiving and tokenizing incoming requests from clients.
-    \item Enqueuing tokenized requests into the scheduling queue.
-    \item Streaming back responses as they become available from the engine.
+    \item Enqueuing tokenized requests into the message queue.
+    \item Streaming back partial responses as they become available from the engine.
     \item Detokenizing completed sequences and packaging them into response
           objects.
-    \item Emitting the response back to the client.
+    \item Emitting the final response back to the client.
 \end{enumerate}
 
 \paragraph{Engine core thread.}
@@ -87,7 +87,7 @@ simulation perspective, this has a linear dependency on the number of input toke
 
 \paragraph{2. Pre-process.}
 Upon arrival, the API server thread tokenizes the prompt, performs light
-validation, and enqueues the request into the scheduling queue contributing a latency of $m_i$. This has a linear dependence 
+validation, and enqueues the request into the message queue contributing a latency of $m_i$. This has a linear dependence 
 on the number of input tokens.
 
 \paragraph{3. Scheduling.} The request waits in the queue until there is sufficient GPU capacity; here, sufficiency
@@ -97,7 +97,7 @@ sum of the durations of the busy loop iterations within this period.
 \paragraph{4. Chunked prefill.} The duration of prefill equals the
 sum of the durations of the busy loop iterations wherein the request participated in its prefill phase.
 
-\paragraph{5. Decode.} The duration of prefill equals the
+\paragraph{5. Decode.} The duration of decode equals the
 sum of the durations of the busy loop iterations wherein the request participated in its decode phase.
 
 \paragraph{6. Post-process.} Once all output tokens are produced, the API server detokenizes them and
@@ -123,8 +123,8 @@ dependence on the number of tokens in the response: $t_i^{in} + t_i^{out}$.
 $e_i$ & End-to-end latency of request $i$ \\
 $n_i^{\text{in}}, n_i^{\text{out}}$ & client-to-server and server-to-client communication latencies for request $i$ \\
 $n_i$ & Total client-server communication latency for request $i$; equals $n_i^{\text{in}} + n_i^{\text{out}}$  \\
-$m_i$ & Pre-processing latency (API $\to$ scheduling queue) for request $i$ \\
-$s_i$ & Waiting time in the scheduling queue for request $i$ \\
+$m_i$ & Pre-processing latency (API $\to$ message queue) for request $i$ \\
+$s_i$ & Waiting time in the message queue for request $i$ \\
 $p_i$ & Prefill latency (scheduled $\to$ first token) for request $i$ \\
 $d_i$ & Decode latency (first $\to$ last token) for request $i$ \\
 $c_i$ & Post-processing latency for request $i$ \\
