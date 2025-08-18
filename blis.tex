@@ -109,8 +109,7 @@ The server emits response $i$, which traverses the network before reaching the
 client. This contributes a network egress delay $n_i^{\text{out}}$, with a linear
 dependence on the number of tokens in the response: $t_i^{in} + t_i^{out}$.
 
-
-\begin{table}[h]
+\begin{table}[ht]
 \centering
 \caption{Notation for request life-cycle and busy-loop model.}
 \label{tab:notation}
@@ -137,9 +136,11 @@ $\rho_j$ & Requests in the message queue at the start of iteration $j$ \\
 $\tau_j$ & Total input tokens across all queued requests at $j$ \\
 $\pi_j$ & Number of prefill requests in $\mathcal{B}_j$ \\
 $\delta_j$ & Number of decode requests active in batch at $j$ \\
-$\chi_{j,i}^{\text{hit,new}}$ & Cache hits (blocks) in \emph{new} prefill blocks for request $i$ at $j$ \\
-$\chi_{j,i}^{\text{miss}}$ & Cache misses (blocks) in \emph{new} prefill blocks for request $i$ at $j$ \\
-$\chi_{j,i}^{\text{hit,all}}$ & \emph{Total} cache hits (all blocks) for request $i$ at $j$ \\
+$\chi_{j,i}^{\text{hit,new}}$ & Cache hits (blocks) in \emph{new} prefill blocks for request $i$ at $j$; this is an integer \\
+$\chi_{j,i}^{\text{miss}}$ & Cache misses (blocks) in \emph{new} prefill blocks for request $i$ at $j$; \\
+                           & for ease of estimation, we define this not as an integer, but as the ratio between \\
+                           & number of tokens involved in the cache miss and the block size \\
+$\chi_{j,i}^{\text{hit,all}}$ & \emph{Total} cache hits (all blocks) for request $i$ at $j$; this is an integer \\
 $\tau_j^{\text{dec}}$ & Total decode tokens across all decode requests in batch at $j$ \\
 $\psi_j$ & Quadratic cache penalty term at $j$ (Def.~\ref{eq:quad}) \\
 $\rho_j^{\text{pre-fin}}$ & Number of prefill requests that finished in iteration $j$ \\
@@ -157,6 +158,9 @@ $\mathcal{D}_i$ & Iterations where request $i$ participates in decode \\
 \hline
 $\alpha_0$, $\alpha_1$, $\alpha_2$, $\beta_0$, $\beta_1$, $\ldots$ & Coefficients for parametric models \\
 \hline
+\multicolumn{2}{l}{\textit{vLLM Params}} \\
+\hline
+$b$ & Number of tokens in a block \\
 \end{tabular}
 \end{table}
 
@@ -219,6 +223,32 @@ and cache shape features:
 
 \subsection{Base Estimation with Linear Regression}
 \label{subsec:base-estimation-linear-regression}
+
+We estimate the model coefficients through a set of scenarios as follows. Each scenario involves a 
+sequence of inference requests emitted by the client such that a few conditions hold.
+
+\subsubsection{Scenario 1}
+\label{subsubsec:scenario1}
+
+\begin{enumerate}
+      \item $\forall i$, client emits request $i+1$ only after final repsonse for request $i$ is received.
+      \item Each request is a prefill request, and has a single prompt.
+      \item Each prompt has a length that is $\leq$ chunk size.
+      \item No two prompts (across requests in the workload) have a prefix match. 
+      This condition holds if and only if the sequence of tokens in the first block of each request is unique.
+\end{enumerate}
+
+The above scenario leads to a simplified system of equations as follows.
+
+\begin{align}
+ \forall i \in \text{Scenario 1}:\quad 
+   e_i &= (\alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11}) + 
+   (\alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}) \cdot t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber \\
+   &= \gamma_0 + \gamma_1 t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \label{eqn:scenario1} \\
+ \text{where}\quad 
+   \gamma_0 &\doteq \alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
+   \gamma_1 &\doteq \alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}
+\end{align}
 
 \subsection{Refinements using Blackbox Optimization}
 \label{subsec:refinements-blackbox-optimization}
