@@ -1,0 +1,148 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}   
+\usepackage{times}            
+\usepackage{graphicx}         
+\usepackage{amsmath, amssymb} 
+\usepackage{hyperref}         
+\usepackage{geometry}         
+\geometry{margin=1in}
+
+\title{BLIS: Blackbox Inference Simulator}
+\author{AI Platform Optimization Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper introduces BLIS, a blackbox inference simulator designed to model request flows and latency in large language model (LLM) inference workloads.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:introduction}
+
+\section{Related Work}
+\label{sec:related-work}
+
+\section{Design overview}
+\label{sec:design-overview}
+
+Our simulator is primarily geared towards vLLM. We will describe extensions for other
+inference platforms like sglang in Section \ref{sec:future-work}.
+
+\subsection{vLLM overview}
+\label{subsec:vllm-overview}
+We will focus on handling of an inference request by vLLM. Conceptually, vLLM
+has two main components: the API server and the engine core; these operate as separate threads and
+communicate through internal queues.
+
+\paragraph{API server thread.}  
+The API server is implemented using FastAPI. Its role is to handle client-facing tasks without blocking on actual model execution. 
+The API thread is responsible for:
+\begin{enumerate}
+    \item Receiving and tokenizing incoming requests from clients.
+    \item Enqueuing tokenized requests into the scheduler’s pending queue.
+    \item Streaming back responses as they become available from the engine.
+    \item Detokenizing completed sequences and packaging them into response
+          objects.
+\end{enumerate}
+
+\paragraph{Engine core thread.}  
+The engine core runs the central \emph{inference loop}. This loop is driven by a
+scheduler that repeatedly:
+\begin{enumerate}
+    \item Collects pending requests from the queue, forming a dynamic batch.
+    \item Determines whether each request is in a \emph{prefill} (first token)
+          or \emph{decode} (subsequent tokens) stage.
+    \item Executes the appropriate forward pass on the GPU for that batch.
+    \item Updates KV cache blocks, manages allocation and eviction, and applies
+          prefix caching optimizations when possible.
+    \item Returns generated tokens back to the API layer, either for streaming
+          or final response.
+\end{enumerate}
+We will refer to this engine loop also as the \emph{busy loop} since it continuously
+steps through micro-batches at a fine-grained timescale (e.g., every few
+microseconds).
+
+\subsection{Simulator Component design}
+\label{subsec:simulator-component-design}
+
+\section{Latency model}
+\label{sec:latency-model}
+
+\subsection{End-to-End request latency model}
+\label{subsec:end-to-end-latency-model}
+
+\subsubsection{Request life-cycle}
+\label{subsubsec:request-life-cycle}
+
+Request is emitted by client. 
+Request hits the server endpoint.
+Request is transferred to the engine wait queue.
+Request is scheduled. At this point, it is part of the running batch.
+Request is prefilled.
+Request is decoded.
+Request is detokenized.
+Client receives the response.
+
+We need notation for stuff such as ... 
+$e_i$: end-to-end latency as seen by the client for request 'i'
+$n_i$: network latency from the time the request was emitted by the client, to the time the request was received by the server.
+
+For e.g., $t_{i, in}$ is the number of input tokens. And this affects the tokenization latency.
+
+
+
+\subsubsection{Busy-loop latency model}
+\label{subsubsec:busy-loop-latency-model}
+
+
+\section{Estimation}
+\label{sec:estimation}
+
+\subsection{Base Estimation with Linear Regression}
+\label{subsec:base-estimation-linear-regression}
+
+\subsection{Refinements using Blackbox Optimization}
+\label{subsec:refinements-blackbox-optimization}
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+\section{Implementation}
+\label{sec:implementation}
+
+\section{Limitations of our Approach}
+\label{sec:limitations}
+
+Our current approach has several important limitations:
+
+\begin{enumerate}
+    \item \textbf{Hardware and model specificity.}  
+    The simulator is calibrated for a fixed combination of GPU type and model
+    architecture. We do not attempt to generalize across different hardware or
+    models. If either changes, the simulator must be retrained with new data.
+
+    \item \textbf{No modeling of pre-emption.}  
+    We do not simulate pre-emption of running requests. In practice, triggering
+    pre-emption during request handling is rare and avoided by the scheduler
+    logic, but its absence in our model means we cannot accurately predict
+    latency under pre-emptive scenarios.
+
+    \item \textbf{No modeling of speculative decoding.}  
+    We currently omit speculative decoding mechanisms (such as those recently
+    introduced in vLLM as an experimental feature).
+\end{enumerate}
+
+\section{Future Work}
+\label{sec:future-work}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\bibliographystyle{plain}
+\bibliography{blis}
+
+\end{document}
