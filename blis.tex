@@ -1,11 +1,11 @@
 \documentclass[11pt]{article}
 
-\usepackage[utf8]{inputenc}   
-\usepackage{times}            
-\usepackage{graphicx}         
-\usepackage{amsmath, amssymb} 
-\usepackage{hyperref}         
-\usepackage{geometry}         
+\usepackage[utf8]{inputenc}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{hyperref}
+\usepackage{geometry}
 \geometry{margin=1in}
 
 \title{BLIS: Blackbox Inference Simulator}
@@ -34,37 +34,37 @@ inference platforms like sglang in Section \ref{sec:future-work}.
 
 \subsection{vLLM overview}
 \label{subsec:vllm-overview}
-We will focus on handling of an inference request by vLLM. Conceptually, vLLM
+We will focus on handling of an inference request by vLLM. vLLM
 has two main components: the API server and the engine core; these operate as separate threads and
-communicate through internal queues.
+communicate through a scheduling queue.
 
-\paragraph{API server thread.}  
-The API server is implemented using FastAPI. Its role is to handle client-facing tasks without blocking on actual model execution. 
+\paragraph{API server thread.}
+The API server is implemented using FastAPI. Its role is to handle client-facing tasks without blocking on actual model execution.
 The API thread is responsible for:
 \begin{enumerate}
     \item Receiving and tokenizing incoming requests from clients.
-    \item Enqueuing tokenized requests into the scheduler’s pending queue.
+    \item Enqueuing tokenized requests into the scheduling queue.
     \item Streaming back responses as they become available from the engine.
     \item Detokenizing completed sequences and packaging them into response
           objects.
+    \item Emitting the response back to the client.
 \end{enumerate}
 
-\paragraph{Engine core thread.}  
+\paragraph{Engine core thread.}
 The engine core runs the central \emph{inference loop}. This loop is driven by a
 scheduler that repeatedly:
 \begin{enumerate}
     \item Collects pending requests from the queue, forming a dynamic batch.
     \item Determines whether each request is in a \emph{prefill} (first token)
           or \emph{decode} (subsequent tokens) stage.
-    \item Executes the appropriate forward pass on the GPU for that batch.
+    \item Executes the forward pass on the GPU for that batch.
     \item Updates KV cache blocks, manages allocation and eviction, and applies
           prefix caching optimizations when possible.
     \item Returns generated tokens back to the API layer, either for streaming
           or final response.
 \end{enumerate}
-We will refer to this engine loop also as the \emph{busy loop} since it continuously
-steps through micro-batches at a fine-grained timescale (e.g., every few
-microseconds).
+We will refer to this engine loop as the \emph{busy loop} since it continuously
+steps through request-batches at a fine-grained timescale.
 
 \subsection{Simulator Component design}
 \label{subsec:simulator-component-design}
@@ -72,32 +72,148 @@ microseconds).
 \section{Latency model}
 \label{sec:latency-model}
 
-\subsection{End-to-End request latency model}
-\label{subsec:end-to-end-latency-model}
-
 \subsubsection{Request life-cycle}
 \label{subsubsec:request-life-cycle}
 
-Request is emitted by client. 
-Request hits the server endpoint.
-Request is transferred to the engine wait queue.
-Request is scheduled. At this point, it is part of the running batch.
-Request is prefilled.
-Request is decoded.
-Request is detokenized.
-Client receives the response.
+We formalize the progression of a single request $i$ through the inference system.
+Each stage is associated with latencies and variables in
+Table~\ref{tab:notation} that are estimated, and collectively, they determine the end-to-end delay
+$e_i$.
 
-We need notation for stuff such as ... 
-$e_i$: end-to-end latency as seen by the client for request 'i'
-$n_i$: network latency from the time the request was emitted by the client, to the time the request was received by the server.
+\paragraph{1. Ingress.}
+The client emits request $i$, which traverses the network before reaching the
+server. This contributes a network ingress delay $n_i^{\text{in}}$. From the
+simulation perspective, this has a linear dependency on the number of input tokens in the request.
 
-For e.g., $t_{i, in}$ is the number of input tokens. And this affects the tokenization latency.
+\paragraph{2. Pre-process.}
+Upon arrival, the API server thread tokenizes the prompt, performs light
+validation, and enqueues the request into the scheduling queue contributing a latency of $m_i$. This has a linear dependence 
+on the number of input tokens.
+
+\paragraph{3. Scheduling.} The request waits in the queue until there is sufficient GPU capacity; here, sufficiency
+is determined by the batching policy, token budget, and other vLLM params. The duration of this waiting period equals the
+sum of the durations of the busy loop iterations within this period.
+
+\paragraph{4. Chunked prefill.} The duration of prefill equals the
+sum of the durations of the busy loop iterations wherein the request participated in its prefill phase.
+
+\paragraph{5. Decode.} The duration of prefill equals the
+sum of the durations of the busy loop iterations wherein the request participated in its decode phase.
+
+\paragraph{6. Post-process.} Once all output tokens are produced, the API server detokenizes them and
+packages the final response. This incurs a completion latency $c_i$, with a linear dependence on 
+the number of input and output tokens $t_i^{in}$ and $t_i^{out}$.
+
+\paragraph{7. Egress.}
+The server emits response $i$, which traverses the network before reaching the
+client. This contributes a network egress delay $n_i^{\text{out}}$, with a linear
+dependence on the number of tokens in the response: $t_i^{in} + t_i^{out}$.
 
 
+\begin{table}[h]
+\centering
+\caption{Notation for request life-cycle and busy-loop model.}
+\label{tab:notation}
+\begin{tabular}{ll}
+\hline
+\textbf{Symbol} & \textbf{Meaning} \\
+\hline
+\multicolumn{2}{l}{\textit{Per-request variables}} \\
+\hline
+$e_i$ & End-to-end latency of request $i$ \\
+$n_i^{\text{in}}, n_i^{\text{out}}$ & client-to-server and server-to-client communication latencies for request $i$ \\
+$n_i$ & Total client-server communication latency for request $i$; equals $n_i^{\text{in}} + n_i^{\text{out}}$  \\
+$m_i$ & Enqueue latency (API $\to$ message queue) for request $i$ \\
+$s_i$ & Waiting time in the message queue for request $i$ \\
+$p_i$ & Prefill latency (scheduled $\to$ first token) for request $i$ \\
+$d_i$ & Decode latency (first $\to$ last token) for request $i$ \\
+$c_i$ & Completion latency (post-processing / packaging) for request $i$ \\
+$t_i^{\text{in}}, t_i^{\text{out}}$ & Input / output tokens of request $i$ \\
+\hline
+\multicolumn{2}{l}{\textit{Busy-loop variables (iteration $j$)}} \\
+\hline
+$\lambda_j$ & Duration (length) of busy-loop iteration $j$ \\
+$\rho_j$ & Requests in the message queue at the start of iteration $j$ \\
+$\tau_j$ & Total input tokens across all queued requests at $j$ \\
+$\pi_j$ & Number of prefill requests in $\mathcal{B}_j$ \\
+$\delta_j$ & Number of decode requests active in batch at $j$ \\
+$\chi_{j,i}^{\text{hit,new}}$ & Cache hits (blocks) in \emph{new} prefill blocks for request $i$ at $j$ \\
+$\chi_{j,i}^{\text{miss}}$ & Cache misses (blocks) in \emph{new} prefill blocks for request $i$ at $j$ \\
+$\chi_{j,i}^{\text{hit,all}}$ & \emph{Total} cache hits (all blocks) for request $i$ at $j$ \\
+$\tau_j^{\text{dec}}$ & Total decode tokens across all decode requests in batch at $j$ \\
+$\psi_j$ & Quadratic cache penalty term at $j$ (Def.~\ref{eq:quad}) \\
+$\rho_j^{\text{pre-fin}}$ & Number of prefill requests that finished in iteration $j$ \\
+$\rho_j^{\text{dec-fin}}$ & Number of decode requests that finished in iteration $j$ \\
+$\tau_j^{\text{fin}}$ & Number of tokens across all \emph{decode} requests that finished in $j$ \\
+\hline
+\multicolumn{2}{l}{\textit{Sets}} \\
+\hline
+$\mathcal{B}_j$ & Set of requests included in the batch at iteration $j$ \\
+$\mathcal{S}_i$ & Iterations where request $i$ is waiting in the message queue \\
+$\mathcal{P}_i$ & Iterations where request $i$ participates in prefill \\
+$\mathcal{D}_i$ & Iterations where request $i$ participates in decode \\
+\hline
+\multicolumn{2}{l}{\textit{Coefficients}} \\
+\hline
+$\alpha_0$, $\alpha_1$, $\alpha_2$, $\beta_0$, $\beta_1$, $\ldots$ & Coefficients for parametric models \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{End-to-End request latency model}
+\label{subsec:end-to-end-latency-model}
+
+\paragraph{Decomposition form.}
+\begin{align}
+e_i &= n_i^{\text{in}} + m_i + s_i + p_i + d_i + c_i + n_i^{\text{out}}
+\label{eq:end-to-end}
+\end{align}
+
+\paragraph{Parametric regression form.}
+\begin{align}
+e_i
+&= \alpha_0
+ + \alpha_1\, t_i^{\text{in}}
+ + \alpha_2\, t_i^{\text{out}}
+ + \sum_{j \in \mathcal{S}_i} \lambda_j
+ + \sum_{j \in \mathcal{P}_i} \lambda_j
+ + \sum_{j \in \mathcal{D}_i} \lambda_j
+\label{eq:e2e-param}
+\end{align}
 
 \subsubsection{Busy-loop latency model}
 \label{subsubsec:busy-loop-latency-model}
 
+We first define the quadratic cache penalty term that captures nonlinear
+interactions between cache \emph{misses} in newly admitted prefill blocks and
+\emph{total} cache hits during iteration $j$:
+\begin{align}
+\psi_j
+  = \sum_{i \in \mathcal{B}_j}
+    \Big(
+      \chi_{j,i}^{\text{miss}} \cdot \chi_{j,i}^{\text{hit,all}}
+      + \big(\chi_{j,i}^{\text{miss}}\big)^2
+    \Big)
+\label{eq:quad}
+\end{align}
+
+The duration of iteration $j$ is now modeled as a quadratic function of features derived from queue, batch, 
+and cache shape features:
+\begin{align}
+\lambda_j & = \beta_0 && \text{(intercept)} \\
+ & + \beta_1 \rho_j
+ + \beta_2 \tau_j && \text{(scheduling)} \\
+ & + \beta_3 \pi_j
+ + \beta_4 \sum_{i \in \mathcal{B}_j} \chi_{j,i}^{\text{hit,new}}
+ + \beta_5 \sum_{i \in \mathcal{B}_j} \chi_{j,i}^{\text{miss}} 
+ + \beta_6 \psi_j && \text{(prefill; last term is quadratic)} \\
+ & + \beta_7 \delta_j 
+ + \beta_8 \tau_j^{\text{dec}} && \text{(decode)} \\
+ & + \beta_9 \rho_j^{\text{pre-fin}}
+ + \beta_{10} \rho_j^{\text{dec-fin}}
+ + \beta_{11} \tau_j^{\text{fin}} && \text{(post-process)}
+\label{eq:busy-loop-expanded}
+\end{align}
 
 \section{Estimation}
 \label{sec:estimation}
@@ -120,18 +236,18 @@ For e.g., $t_{i, in}$ is the number of input tokens. And this affects the tokeni
 Our current approach has several important limitations:
 
 \begin{enumerate}
-    \item \textbf{Hardware and model specificity.}  
+    \item \textbf{Hardware and model specificity.}
     The simulator is calibrated for a fixed combination of GPU type and model
     architecture. We do not attempt to generalize across different hardware or
     models. If either changes, the simulator must be retrained with new data.
 
-    \item \textbf{No modeling of pre-emption.}  
+    \item \textbf{No pre-emption.}
     We do not simulate pre-emption of running requests. In practice, triggering
     pre-emption during request handling is rare and avoided by the scheduler
     logic, but its absence in our model means we cannot accurately predict
     latency under pre-emptive scenarios.
 
-    \item \textbf{No modeling of speculative decoding.}  
+    \item \textbf{No speculative decoding.}
     We currently omit speculative decoding mechanisms (such as those recently
     introduced in vLLM as an experimental feature).
 \end{enumerate}
