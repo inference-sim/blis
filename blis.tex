@@ -205,15 +205,15 @@ that computed when there are cache misses and cache hits for requests during ite
 The duration of iteration $j$ is now modeled as a quadratic function of features derived from the contents of the queue, batch, 
 and cache as follows:
 \begin{align}
-\lambda_j & \approx \beta_0 && \text{(intercept)} \\
+\lambda_j & \approx \beta_0 && \text{(intercept)} \nonumber \\
  & + \beta_1 \rho_j
- + \beta_2 \tau_j && \text{(scheduling)} \\
+ + \beta_2 \tau_j && \text{(scheduling)} \nonumber \\
  & + \beta_3 \pi_j
  + \beta_4 \sum_{i \in \mathcal{B}_j} \chi_{j,i}^{\text{hit,new}}
  + \beta_5 \sum_{i \in \mathcal{B}_j} \chi_{j,i}^{\text{miss}} 
- + \beta_6 \psi_j && \text{(prefill; last term is quadratic)} \\
+ + \beta_6 \psi_j && \text{(prefill; last term is quadratic)} \nonumber \\
  & + \beta_7 \delta_j 
- + \beta_8 \tau_j^{\text{dec}} && \text{(decode)} \\
+ + \beta_8 \tau_j^{\text{dec}} && \text{(decode)} \nonumber \\
  & + \beta_9 \rho_j^{\text{pre-fin}}
  + \beta_{10} \rho_j^{\text{dec-fin}}
  + \beta_{11} \tau_j^{\text{fin}} && \text{(post-process)}
@@ -249,8 +249,9 @@ Under these conditions, the end-to-end latency model reduces to a simplified for
  \forall i \in \text{Scenario 1}:\quad 
    e_i &\approx (\alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11}) \nonumber \\
        &\quad + \big(\alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}\big) \cdot t_i^{\text{in}}
-       + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \label{eqn:scenario1} \\
-   &\approx \gamma_0 + \gamma_1 t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber
+       + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber \\
+   &\approx \gamma_0 + \gamma_1 t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 
+   \label{eq:scenario1}
 \end{align}
 
 with definitions
