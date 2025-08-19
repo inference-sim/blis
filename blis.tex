@@ -175,7 +175,7 @@ e_i = n_i + m_i + s_i + p_i + d_i + c_i
 
 \paragraph{Suitable for estimation.}
 \begin{align}
-e_i = \alpha_0
+e_i \simeq \alpha_0
  + \alpha_1\, t_i^{\text{in}}
  + \alpha_2\, t_i^{\text{out}}
  + \sum_{j \in \mathcal{S}_i} \lambda_j
@@ -183,6 +183,10 @@ e_i = \alpha_0
  + \sum_{j \in \mathcal{D}_i} \lambda_j
 \label{eq:e2e-param}
 \end{align}
+
+\textbf{Note:} Regression equations such as Eqn (\ref{eq:e2e-param}) and (\ref{eq:busy-loop-expanded})
+are understood to hold up to an additive residual noise term. When we write $a \approx b$, it is shorthand for $a=b+\varepsilon$ 
+where $\varepsilon$ is the noise term. 
 
 \subsubsection{Busy-loop latency model}
 \label{subsubsec:busy-loop-latency-model}
@@ -201,7 +205,7 @@ that computed when there are cache misses and cache hits for requests during ite
 The duration of iteration $j$ is now modeled as a quadratic function of features derived from the contents of the queue, batch, 
 and cache as follows:
 \begin{align}
-\lambda_j & = \beta_0 && \text{(intercept)} \\
+\lambda_j & \approx \beta_0 && \text{(intercept)} \\
  & + \beta_1 \rho_j
  + \beta_2 \tau_j && \text{(scheduling)} \\
  & + \beta_3 \pi_j
@@ -243,10 +247,10 @@ Under these conditions, the end-to-end latency model reduces to a simplified for
 
 \begin{align}
  \forall i \in \text{Scenario 1}:\quad 
-   e_i &= (\alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11}) \nonumber \\
+   e_i &\approx (\alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11}) \nonumber \\
        &\quad + \big(\alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}\big) \cdot t_i^{\text{in}}
        + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \label{eqn:scenario1} \\
-   &= \gamma_0 + \gamma_1 t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber
+   &\approx \gamma_0 + \gamma_1 t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber
 \end{align}
 
 with definitions
