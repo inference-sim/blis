@@ -83,12 +83,12 @@ $e_i$.
 \paragraph{1. Ingress.}
 The client emits request $i$, which traverses the network before reaching the
 server. This contributes a network ingress delay $n_i^{\text{in}}$. From the
-simulation perspective, this has a linear dependency on the number of input tokens in the request.
+simulation perspective, this has a linear dependency on the number of input tokens in the request, $t_i^{in}$.
 
 \paragraph{2. Pre-process.}
 Upon arrival, the API server thread tokenizes the prompt, performs light
 validation, and enqueues the request into the message queue contributing a latency of $m_i$. This has a linear dependence 
-on the number of input tokens.
+on the number of input tokens, $t_i^{in}$.
 
 \paragraph{3. Scheduling.} The request waits in the queue until there is sufficient GPU capacity; here, sufficiency
 is determined by the batching policy, token budget, and other vLLM params. The duration of this waiting period equals the
