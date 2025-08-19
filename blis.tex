@@ -101,7 +101,7 @@ sum of the durations of the busy loop iterations wherein the request participate
 sum of the durations of the busy loop iterations wherein the request participated in its decode phase.
 
 \paragraph{6. Post-process.} Once all output tokens are produced, the API server detokenizes them and
-packages the final response. This incurs a completion latency $c_i$, with a linear dependence on 
+packages the final response. This incurs a post-process latency $c_i$, with a linear dependence on 
 the number of input and output tokens $t_i^{in}$ and $t_i^{out}$.
 
 \paragraph{7. Egress.}
