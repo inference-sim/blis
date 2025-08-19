@@ -190,8 +190,8 @@ where $\varepsilon$ is the noise term.
 
 \subsubsection{Busy-loop latency model}
 \label{subsubsec:busy-loop-latency-model}
-We first define the quadratic term that captures the quadratic size of the KV tensor matrices
-that computed when there are cache misses and cache hits for requests during iteration $j$:
+We first define the quadratic term that captures the quadratic size of the the KV tensors
+that are computed in the presence of cache misses and cache hits for requests during iteration $j$:
 \begin{align}
 \psi_j
   = \sum_{i \in \mathcal{B}_j}
