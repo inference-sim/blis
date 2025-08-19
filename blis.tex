@@ -262,8 +262,8 @@ with definitions
 
 \paragraph{Estimation.}
 The parameters of interest in this scenario are $\gamma_0$, $\gamma_1$, and $\beta_6$.
-These can be estimated by generating workloads that strictly satisfy the conditions
-above. To ensure sufficient variation in prompt length, we configure the chunk
+These can be estimated by generating inference request workloads that strictly satisfy the Scenario 1 conditions. 
+To ensure sufficient variation in prompt length, we configure the chunk
 size to be large (e.g., $2048$ tokens), which allows $t_i^{\text{in}}$ to vary
 across a wide range. The block size $b$ is fixed at $16$, consistent with typical
 production settings. With this setup, ordinary least squares regression on the
