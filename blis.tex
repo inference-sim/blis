@@ -256,7 +256,7 @@ Under these conditions, the end-to-end latency model reduces to a simplified for
 
 with definitions
 \begin{align}
-   \gamma_{10} &\doteq \alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
+   \label{eqn: gamma_10} \gamma_{10} &\doteq \alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
    \gamma_{11} &\doteq \alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}
 \end{align}
 
@@ -295,53 +295,16 @@ Under these conditions, the end-to-end latency model reduces to a simplified for
 
 with definitions
 \begin{align}
-   \gamma_{20} &\doteq \alpha_0 + \beta_1 + \beta_9 + \beta_{11} \\
+   \label{eqn: gamma_20} \gamma_{20} &\doteq \alpha_0 + \beta_1 + \beta_9 + \beta_{11} \\
    \gamma_{21} &\doteq \alpha_1 + \frac{\beta_0}{C} + \beta_2 + \frac{\beta_3}{C} + \frac{\beta_5}{b} + \frac{3\beta_6C^2}{2b^2} + \beta_{11}
 \end{align}
 
 \paragraph{Estimation.}
-Estimate the parameters $\gamma_{20}$ and $\gamma_{21}$ as in Scenario 1.
+Estimate the parameters $\gamma_{20}$ and $\gamma_{21}$ as in Scenario 1. Using eqn. $\ref{eqn: gamma_20} -$ eqn. $\ref{eqn: gamma_10}$ we would get $\beta_{0} + \beta_{3}$.
 
 \subsubsection{Scenario 3}
 \label{subsubsec:scenario3}
 
-\begin{enumerate}
-    \item Requests arrive strictly sequentially: request $i+1$ is emitted by the client only after
-    the final response for request $i$ has been received by it.
-    \item Each request is a prefill request. 
-    \item Each request consists of 2 prompts, and is aimed at the \textit{/v1/completions} endpoint of vLLM.
-    \item Each prompt length is $\leq$ the configured chunk size ($C$). 
-    \item Let the maximum number of tokens that can be batched be $M$. In our setting, $2t_i^{\text{in}} \leq M$.
-    \item Prompts have no prefix overlap across requests. Equivalently, the first block
-    of tokens for every prompt is unique.
-\end{enumerate}
-
-Under these conditions, the end-to-end latency model reduces to a simplified form as follows for each prompt.
-
-\begin{align}
- e_1 &\approx (\alpha_0 + \beta_0 + 2\beta_1 + 2\beta_3 + 2\beta_9 + 2\beta_{11}) \nonumber \\
-       &\quad + \big(\alpha_1 + 2\beta_2 + \frac{2\beta_5}{b} + 2\beta_{11}\big) \cdot t_i^{\text{in}}
-       + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 \nonumber \\
-   &\approx \gamma_{30} + \gamma_{31} t_i^{\text{in}} + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 \\
-   \label{eq:scenario3_1}
-\end{align}
-
-\begin{align}
-e_2 &\approx (\alpha_0 + \beta_0 + 2\beta_1 + 2\beta_3 + 2\beta_9 + 2\beta_{11}) \nonumber \\
-      &\quad + \big(2\alpha_1 + 2\beta_2 + \frac{2\beta_5}{b} + 2\beta_{11}\big) \cdot t_i^{\text{in}}
-      + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 \nonumber \\
-  &\approx \gamma_{30} + \gamma_{32} t_i^{\text{in}} + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 
-  \label{eq:scenario3_2}
-\end{align}
-
-with definitions
-\begin{align}
-   \gamma_{20} &\doteq \alpha_0 + \beta_0 + 2\beta_1 + 2\beta_3 + 2\beta_9 + 2\beta_{11} \\
-   \gamma_{21} &\doteq \alpha_1 + 2\beta_2 + \frac{2\beta_5}{b} + 2\beta_{11}
-\end{align}
-
-\paragraph{Estimation.}
-Estimate the parameters $\gamma_{20}$ and $\gamma_{21}$ as in Scenario 1.
 
 \subsection{Refinements using Blackbox Optimization}
 \label{subsec:refinements-blackbox-optimization}
