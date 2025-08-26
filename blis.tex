@@ -250,18 +250,18 @@ Under these conditions, the end-to-end latency model reduces to a simplified for
    e_i &\approx (\alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11}) \nonumber \\
        &\quad + \big(\alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}\big) \cdot t_i^{\text{in}}
        + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber \\
-   &\approx \gamma_0 + \gamma_1 t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 
+   &\approx \gamma_{10} + \gamma_{11} t_i^{\text{in}} + \beta_6 \left( \frac{t_i^{\text{in}}}{b} \right)^2 
    \label{eq:scenario1}
 \end{align}
 
 with definitions
 \begin{align}
-   \gamma_0 &\doteq \alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
-   \gamma_1 &\doteq \alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}
+   \gamma_{10} &\doteq \alpha_0 + \beta_0 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
+   \gamma_{11} &\doteq \alpha_1 + \beta_2 + \frac{\beta_5}{b} + \beta_{11}
 \end{align}
 
 \paragraph{Estimation.}
-The parameters of interest in this scenario are $\gamma_0$, $\gamma_1$, and $\beta_6$.
+The parameters of interest in this scenario are $\gamma_{10}$, $\gamma_{11}$, and $\beta_6$.
 These can be estimated by generating inference request workloads that strictly satisfy the Scenario 1 conditions. 
 To ensure sufficient variation in prompt length, we configure the chunk
 size to be large (e.g., $2048$ tokens), which allows $t_i^{\text{in}}$ to vary
@@ -269,6 +269,79 @@ across a wide range. The block size $b$ is fixed at $16$, consistent with typica
 production settings. With this setup, ordinary least squares regression on the
 measured end-to-end latencies $e_i$ yields estimates for the three parameters.
 
+\subsubsection{Scenario 2}
+\label{subsubsec:scenario2}
+
+\begin{enumerate}
+    \item Requests arrive strictly sequentially: request $i+1$ is emitted by the client only after
+    the final response for request $i$ has been received by it.
+    \item Each request is a prefill request. 
+    \item Each request consists of a single prompt, and is aimed at the \textit{/v1/completions} endpoint of vLLM.
+    \item Each prompt length is $>$ the configured chunk size ($C$). The prompt length $t_i^{in}$ is a multiple of $C$. This triggers a whole number of steps.
+    \item Prompts have no prefix overlap across requests. Equivalently, the first block
+    of tokens for every request is unique.
+\end{enumerate}
+
+Under these conditions, the end-to-end latency model reduces to a simplified form as follows:
+
+\begin{align}
+ \forall i \in \text{Scenario 2}:\quad 
+   e_i &\approx (\alpha_0 + \beta_1 + \beta_9 + \beta_{11}) \nonumber \\
+       &\quad + \big(\alpha_1 + \frac{\beta_0}{C} + \beta_2 + \frac{\beta_3}{C} + \frac{\beta_5}{b} + \frac{3\beta_6C^2}{2b^2} + \beta_{11}\big) \cdot t_i^{\text{in}}
+       + \beta_6C^2 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber \\
+   &\approx \gamma_{20} + \gamma_{21} t_i^{\text{in}} + \beta_6C^2 \left( \frac{t_i^{\text{in}}}{b} \right)^2 
+   \label{eq:scenario2}
+\end{align}
+
+with definitions
+\begin{align}
+   \gamma_{20} &\doteq \alpha_0 + \beta_1 + \beta_9 + \beta_{11} \\
+   \gamma_{21} &\doteq \alpha_1 + \frac{\beta_0}{C} + \beta_2 + \frac{\beta_3}{C} + \frac{\beta_5}{b} + \frac{3\beta_6C^2}{2b^2} + \beta_{11}
+\end{align}
+
+\paragraph{Estimation.}
+Estimate the parameters $\gamma_{20}$ and $\gamma_{21}$ as in Scenario 1.
+
+\subsubsection{Scenario 3}
+\label{subsubsec:scenario3}
+
+\begin{enumerate}
+    \item Requests arrive strictly sequentially: request $i+1$ is emitted by the client only after
+    the final response for request $i$ has been received by it.
+    \item Each request is a prefill request. 
+    \item Each request consists of 2 prompts, and is aimed at the \textit{/v1/completions} endpoint of vLLM.
+    \item Each prompt length is $\leq$ the configured chunk size ($C$). 
+    \item Let the maximum number of tokens that can be batched be $M$. In our setting, $2t_i^{\text{in}} \leq M$.
+    \item Prompts have no prefix overlap across requests. Equivalently, the first block
+    of tokens for every prompt is unique.
+\end{enumerate}
+
+Under these conditions, the end-to-end latency model reduces to a simplified form as follows for each prompt.
+
+\begin{align}
+ e_1 &\approx (\alpha_0 + \beta_0 + 2\beta_1 + 2\beta_3 + 2\beta_9 + 2\beta_{11}) \nonumber \\
+       &\quad + \big(\alpha_1 + 2\beta_2 + \frac{2\beta_5}{b} + 2\beta_{11}\big) \cdot t_i^{\text{in}}
+       + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 \nonumber \\
+   &\approx \gamma_{30} + \gamma_{31} t_i^{\text{in}} + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 \\
+   \label{eq:scenario3_1}
+\end{align}
+
+\begin{align}
+e_2 &\approx (\alpha_0 + \beta_0 + 2\beta_1 + 2\beta_3 + 2\beta_9 + 2\beta_{11}) \nonumber \\
+      &\quad + \big(2\alpha_1 + 2\beta_2 + \frac{2\beta_5}{b} + 2\beta_{11}\big) \cdot t_i^{\text{in}}
+      + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 \nonumber \\
+  &\approx \gamma_{30} + \gamma_{32} t_i^{\text{in}} + \beta_6 \left( \frac{2t_i^{\text{in}}}{b} \right)^2 
+  \label{eq:scenario3_2}
+\end{align}
+
+with definitions
+\begin{align}
+   \gamma_{20} &\doteq \alpha_0 + \beta_0 + 2\beta_1 + 2\beta_3 + 2\beta_9 + 2\beta_{11} \\
+   \gamma_{21} &\doteq \alpha_1 + 2\beta_2 + \frac{2\beta_5}{b} + 2\beta_{11}
+\end{align}
+
+\paragraph{Estimation.}
+Estimate the parameters $\gamma_{20}$ and $\gamma_{21}$ as in Scenario 1.
 
 \subsection{Refinements using Blackbox Optimization}
 \label{subsec:refinements-blackbox-optimization}
