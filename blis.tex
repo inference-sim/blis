@@ -277,30 +277,48 @@ measured end-to-end latencies $e_i$ yields estimates for the three parameters.
     the final response for request $i$ has been received by it.
     \item Each request is a prefill request. 
     \item Each request consists of a single prompt, and is aimed at the \textit{/v1/completions} endpoint of vLLM.
-    \item Each prompt length is $>$ the configured chunk size ($C$). The prompt length $t_i^{in}$ is a multiple of $C$. This triggers a whole number of steps.
+    \item Each prompt length is $>$ the configured chunk size ($C$). There are two sub-scenarios:
+          \begin{itemize}
+            \item \textbf{Sub-scenario2.1:} The prompt length $t_i^{in} = k_{i}C$ where $k > 0$ is a whole number. This triggers a whole number of steps $k_{i}$.
+            \item \textbf{Sub-scenario2.2:} The prompt length $t_i^{in} = k_{i}C + 1$. This triggers $k_{i} + 1$ steps.
+          \end{itemize}
+    Vary $k_{i}$ during the scenario.
     \item Prompts have no prefix overlap across requests. Equivalently, the first block
     of tokens for every request is unique.
 \end{enumerate}
 
-Under these conditions, the end-to-end latency model reduces to a simplified form as follows:
+Under these conditions, let us say for each $k_{i} = {floor} \left( \frac{t_i^{in}}{C} \right)$ you get end-to-end latency values $e_{i1}$ for sub-scenario2.1 and $e_{i2}$ for sub-scenario 2.2.
 
 \begin{align}
- \forall i \in \text{Scenario 2}:\quad 
-   e_i &\approx (\alpha_0 + \beta_1 + \beta_9 + \beta_{11}) \nonumber \\
+ \forall i \in \text{Sub-scenario 2.1}:\quad 
+   e_{i1} &\approx (\alpha_0 + \beta_1 + \beta_9 + \beta_{11}) \nonumber \\
        &\quad + \big(\alpha_1 + \frac{\beta_0}{C} + \beta_2 + \frac{\beta_3}{C} + \frac{\beta_5}{b} + \frac{3\beta_6C^2}{2b^2} + \beta_{11}\big) \cdot t_i^{\text{in}}
        + \beta_6C^2 \left( \frac{t_i^{\text{in}}}{b} \right)^2 \nonumber \\
-   &\approx \gamma_{20} + \gamma_{21} t_i^{\text{in}} + \beta_6C^2 \left( \frac{t_i^{\text{in}}}{b} \right)^2 
-   \label{eq:scenario2}
+   &\approx \gamma_{20} + \gamma_{21} t_i^{\text{in}} + \beta_6C^2 \left( \frac{t_i^{\text{in}}}{b} \right)^2
+   \label{eq:scenario2.1}
+\end{align}
+
+\begin{align}
+   \forall i \in \text{Sub-scenario 2.2 and Sub-scenario 2.1}:\quad 
+   e_{i2} - e_{i1} &\approx (\beta_0 + \beta_3 + \frac{\beta_5}{b}) \nonumber + \beta_6C \left( \frac{t_i^{\text{in}}}{b^2} \right) \nonumber \\
+   &\approx \gamma_{22} + \beta_6C \left( \frac{t_i^{\text{in}}}{b^2} \right)
+   \label{eq:scenario2.2minus1}
 \end{align}
 
 with definitions
 \begin{align}
    \label{eqn: gamma_20} \gamma_{20} &\doteq \alpha_0 + \beta_1 + \beta_9 + \beta_{11} \\
-   \gamma_{21} &\doteq \alpha_1 + \frac{\beta_0}{C} + \beta_2 + \frac{\beta_3}{C} + \frac{\beta_5}{b} + \frac{3\beta_6C^2}{2b^2} + \beta_{11}
+   \gamma_{21} &\doteq \alpha_1 + \frac{\beta_0}{C} + \beta_2 + \frac{\beta_3}{C} + \frac{\beta_5}{b} + \frac{3\beta_6C^2}{2b^2} + \beta_{11} \\
+   \label{eqn: gamma_22} \gamma_{22} &\doteq \beta_0 + \beta_3 + \frac{\beta_5}{b}
 \end{align}
 
 \paragraph{Estimation.}
-Estimate the parameters $\gamma_{20}$ and $\gamma_{21}$ as in Scenario 1. Using eqn. $\ref{eqn: gamma_20} -$ eqn. $\ref{eqn: gamma_10}$ we would get $\beta_{0} + \beta_{3}$.
+Estimate the parameters $\gamma_{20}$, $\gamma_{21}$ and $\gamma_{22}$ as in Scenario 1. Now, to extract more information:
+
+\begin{itemize}
+    \item Using eqns. $\ref{eqn: gamma_10}$ and $\ref{eqn: gamma_20}$, you can get $\gamma_{23} = \gamma_{10} - \gamma_{20} = \beta_{0} + \beta_{3}$.
+    \item Using eqn. $\ref{eqn: gamma_22}$,  you can get $\beta_5 = b(\gamma_{22} - \gamma_{23})$.
+\end{itemize}
 
 \subsubsection{Scenario 3}
 \label{subsubsec:scenario3}
