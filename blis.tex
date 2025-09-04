@@ -126,49 +126,52 @@ requests have this set to a number greater than $1$.
 \subsubsection{Request life-cycle}
 \label{subsubsec:request-life-cycle}
 
-The life of an inference request in the system is illustrated in 
-Figure \ref{fig:req-lifecycle} and described below.
-
-\begin{figure}[h]
+\begin{figure}[!ht]
   \centering
   \includegraphics[height=0.55\textheight]{figs/lifecycle.pdf}
   \caption{Request Lifecycle}
   \label{fig:req-lifecycle}
 \end{figure}
 
+The life of an inference request in the system is illustrated in 
+Figure \ref{fig:req-lifecycle} and described below.
+
 \paragraph{1. Ingress.}
-The client emits request $i$, which traverses the network before reaching the
-server. This contributes a network ingress delay $n_i^{\text{in}}$. From a 
-modeling perspective, this has a linear dependency on the number of 
-input tokens in the request, $t_i^{\text{in}}$.
+The client emits an inference request $i$ to the server. This contributes 
+a network latency that depends linearly on the number of input tokens 
+$t_i^{\text{in}}$.
 
 \paragraph{2. Pre-process.}
-Upon arrival, the API server thread tokenizes the prompt, performs light
-validation, and enqueues the request into the message queue contributing 
-a latency of $u_i$. This has a linear dependence 
-on the number of input tokens, $t_i^{\text{in}}$.
+Upon arrival, the API server tokenizes the prompt, performs light
+validation, and enqueues the request into the message queue. This contributes 
+a latency that depends linearly on $t_i^{\text{in}}$.
 
 \paragraph{3. Scheduling.} The request waits in the queue until there is 
-sufficient GPU capacity. The duration of this waiting period equals the
-sum of the durations of the busy loop iterations, $\mathcal{S}_i$, within this period.
+sufficient GPU capacity. Let $\mathcal{S}_i$ be the set of busy loop iterations 
+during this period. Let $\lambda_j$ denote the duration of busy loop iteration $j$. 
+The duration of this waiting period equals $\sum_{j \in \mathcal{S}_i} \lambda_j$.
 
-\paragraph{4. Chunked prefill.} The duration of prefill equals the
-sum of the durations of the busy loop iterations, $\mathcal{P}_i$ in which the request 
-participated in its prefill phase.
+\paragraph{4. Chunked prefill.} Let $\mathcal{P}_i$ be the set of  
+busy loop iterations in which the request participated in its prefill phase.
+The prefill duration equals $\sum_{j \in \mathcal{P}_i} \lambda_j$. If the 
+input sequence of the request contains $x$ uncached tokens, and the chunk size is $C$, 
+then $\lvert \mathcal{P}_i \rvert = \lceil x/C \rceil$.
 
-\paragraph{5. Decode.} The duration of decode equals the
-sum of the durations of the busy loop iterations, $\mathcal{D}_i$, in which the request 
-participated in its decode phase.
+\paragraph{5. Decode.} Let $\mathcal{D}_i$ be the set of 
+busy loop iterations in which in which the request participated in its decode phase.
+The decode duration equals $\sum_{j \in \mathcal{D}_i} \lambda_j$. The first output
+token is generated during the prefill phase, and subsequent tokens are generated 
+in the decode iterations. Thus, $\lvert \mathcal{D}_i \rvert = t_i^{out} - 1$.
 
 \paragraph{6. Post-process.} Once all output tokens are produced, 
 the API server detokenizes them and
-packages the final response. This incurs a post-process latency $c_i$, 
-with a linear dependence on the number of output tokens $t_i^{\text{out}}$.
+packages the final response. This latency depends linearly on the 
+number of output tokens $t_i^{\text{out}}$.
 
 \paragraph{7. Egress.}
-The server emits response $i$, which traverses the network before reaching the
-client. This contributes a network egress delay $n_i^{\text{out}}$, with a linear
-dependence on the number of output tokens $t_i^{\text{out}}$.
+The server emits response $i$ to the
+client. This contributes a network latency that depends linearly 
+on the number of output tokens $t_i^{\text{out}}$.
 
 \subsection{End-to-End request latency model}
 \label{subsec:end-to-end-latency-model}
@@ -188,16 +191,17 @@ e_i \approx \alpha_0
 
 \textbf{Note:} When we write $a \approx b$, it is shorthand for $a=b+\varepsilon$ 
 where $\varepsilon$ is a residual noise term. Regression equations such 
-as \eqref{eq:e2e-param} are understood to hold up to residual noise term. 
+as \eqref{eq:e2e-param} are understood to hold up to residual noise term.
 
 \subsubsection{Busy-loop latency model}
 \label{subsubsec:busy-loop-latency-model}
-We first define the quadratic term that captures the quadratic size of the the 
-KV tensors that are computed in the presence of cache misses and 
-cache hits for requests during iteration $j$:
+Let $\chi_{j,i}^{\text{hit}}$ and $\chi_{j,i}^{\text{miss}}$ denote the number of 
+cached and uncached tokens (hits and misses) respectively 
+for request $i$ during iteration $j$. Define $\psi_j$ as follows.
+
 \begin{align}
 \psi_j
-  = \sum_{i \in \mathcal{B}_j}
+  = \sum_{i | \text{j is prefill iteration for i}}
     \Big(
       \chi_{j,i}^{\text{miss}} \cdot \chi_{j,i}^{\text{hit}}
       + \big(\chi_{j,i}^{\text{miss}}\big)^2
@@ -205,24 +209,45 @@ cache hits for requests during iteration $j$:
 \label{eq:quad}
 \end{align}
 
-We can now model the duration of iteration $j$ 
+
+We model the duration of iteration $j$ 
 as a quadratic function of queue, batch, 
 and cache related features as follows:
 \begin{align}
-\lambda_j & \approx \beta_0 && \text{(intercept)} \nonumber \\
- & + \beta_1 \rho_j
- + \beta_2 \tau_j && \text{(scheduling)} \nonumber \\
- & + \beta_3 \pi_j
- + \beta_4 \sum_{i \in \mathcal{B}_j} \chi_{j,i}^{\text{hit,new}}
- + \beta_5 \sum_{i \in \mathcal{B}_j} \chi_{j,i}^{\text{miss}} 
- + \beta_6 \psi_j && \text{(prefill; last term is quadratic)} \nonumber \\
- & + \beta_7 \delta_j 
- + \beta_8 \tau_j^{\text{dec}} && \text{(decode)} \nonumber \\
- & + \beta_9 \rho_j^{\text{pre-fin}}
- + \beta_{10} \rho_j^{\text{dec-fin}}
- + \beta_{11} \tau_j^{\text{fin}} && \text{(post-process)}
+\lambda_j & \approx \beta_0 \nonumber \\
+ & + \beta_1 \times \sum_{i | \text{j is first prefill iteration for i}} \chi_{j,i}^{\text{hit}} \nonumber \\
+ & + \beta_2 \times \sum_{i | \text{j is prefill iteration for i}} \chi_{j,i}^{\text{miss}} \nonumber \\
+ & + \beta_3 \times \psi_j \nonumber \\
+ & + \beta_4 \times \text{(number of decode requests in j)} \nonumber \\ 
+ & + \beta_5 \times \text{(total length of decode requests in j)} \nonumber \\
+ & + \beta_6 \times \text{(number of requests finishing in j)} \nonumber \\ 
+ & + \beta_7 \times \text{(total length of requests finishing in j)} 
 \label{eq:busy-loop-expanded}
 \end{align}
+
+\noindent\textbf{Justification:} Each busy-loop step mixes four kinds of work.
+
+\begin{enumerate}
+  \item \emph{Fixed work.} An iteration-invariant cost (\(\beta_0\)).
+  \item \emph{Prefill work.} The first prefill iteration of a request involves hashing
+the tokens to determine the number of cache hits (linear in hits; \(\beta_1\)).
+Every new token pays a linear per-token cost (embeddings, MLP, KV writes; \(\beta_2\)).
+Attention mechanism during prefill is quadratic: every new token 
+(cache miss) must attend to all tokens already in the context (cache hit) 
+plus the other new tokens from the same chunk (\(\psi_j\) in~\eqref{eq:quad}; 
+\(\beta_3\)).
+  \item \emph{Decode work.} Decode emits at most one token per active request:
+there is a per-request overhead (\(\beta_4\)) and compute that scales with
+the request’s current context length (\(\beta_5\)).
+  \item \emph{Completion work.} When a request completes, we free KV blocks, update
+refcounts, and serialize output; this scales linearly in the number of 
+finished requests 
+(\(\beta_6\)) and the total length of finished requests (\(\beta_7\)).
+\end{enumerate}
+
+The coefficients \(\{\beta_k\}\) absorb model/hardware constants
+(layers, heads, width, precision, kernel efficiency).
+
 
 \section{Estimation}
 \label{sec:estimation}
