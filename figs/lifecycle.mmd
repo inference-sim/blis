@@ -1,0 +1,64 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontSize": "120px",
+    "sequenceNumberFontSize": "0px",   // no number badges
+    "actorTextColor": "#111",
+    "primaryColor": "#f3f4f6",
+    "secondaryColor": "#e5e7eb",
+    "tertiaryColor": "#f9fafb",
+    "lineColor": "#333"
+  },
+  "sequence": {
+    "showSequenceNumbers": false,
+    "mirrorActors": false,
+    "rightAngles": false,
+    "actorMargin": 10,
+    "messageMargin": 10,
+    "noteMargin": 5,
+    "wrap": true,
+    "useMaxWidth": false
+  }
+}}%%
+sequenceDiagram
+    %% autonumber  <-- removed to avoid number circles
+
+    participant C as Client
+    participant A as API Server
+    participant Q as Message Queue
+    participant E as Engine Core
+    participant G as GPU
+
+    C->>A: Emit request i
+
+    A->>A: Pre-process request
+    A->>Q: Enqueue tokenized request i
+
+    %% Scheduling loop 
+    Note over Q: Scheduling
+    loop Wait in the message queue to be scheduled
+        Q-->E: busy loop iterations for other requests
+    end
+
+
+    Q->>E: Admit request i when capacity available
+
+    %% Prefill loop contains its work
+    Note over E: Prefill
+    loop Chunked prefill iterations for request i
+        E->>G: Forward pass
+        E->>G: KV and prefix cache updates, including evictions
+    end
+
+    %% Decode loop contains its work
+    Note over E: Decode
+    loop Decode iterations for request i
+        E->>G: Forward pass
+        E->>G: KV and prefix cache updates, including evictions
+    end
+
+    E-->>A: Stream partial tokens and final tokens
+
+    A->>A: Post-process
+
+    A-->>C: Emit response i (stream and final)
