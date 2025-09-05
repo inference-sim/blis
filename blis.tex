@@ -116,14 +116,14 @@ steps through request-batches at a fine-grained timescale.
 \section{Latency model}
 \label{sec:latency-model}
 
-\subsubsection{Request types}
+\subsection{Request types}
 \label{subsubsec:request-types}
 
 Requests can be of two types: \textit{prefill-only} or \textit{decode}. 
 Prefill-only requests have their maximum output length set to $1$, and \textit{decode}
 requests have this set to a number greater than $1$.
 
-\subsubsection{Request life-cycle}
+\subsection{Request life-cycle}
 \label{subsubsec:request-life-cycle}
 
 \begin{figure}[!ht]
@@ -188,7 +188,6 @@ e_i \approx \alpha_0
 \textbf{Note:} When we write $a \approx b$, it is shorthand for $a=b+\varepsilon$ 
 where $\varepsilon$ is a residual noise term. Regression equations such 
 as \eqref{eq:e2e-param} are understood to hold up to residual noise term.
-
 
 \subsubsection{Busy loop}
 \label{subsubsec:busy-loop-latency-model}
@@ -683,6 +682,7 @@ Our current approach has several important limitations:
 \section{Conclusion}
 \label{sec:conclusion}
 
+\nocite{*}
 \bibliographystyle{plain}
 \bibliography{blis}
 
