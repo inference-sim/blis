@@ -419,6 +419,84 @@ output is $1$).
 Collecting all nonzero contributions gives \eqref{eq:req1-latency}.
 \end{proof}
 
+\begin{lemma}[Latency of request $(i,2)$]
+\label{lemma:req2-latency}
+Define
+\[
+q_2=\left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor,\quad
+r_2=\left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil,\quad
+s_2=\frac{1 + \Delta_{i,2}}{C} - q_2 \in [0,1).
+\]
+Then the end-to-end latency of request $(i,2)$ satisfies
+\begin{align}
+e_{i,2} & \approx \alpha_0
+  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
+  + \alpha_2 \nonumber\\
+& + \beta_0 r_2
+  + \beta_1 (4 + \Delta_{i,1})
+  + \beta_2 (1 + \Delta_{i,2}) \nonumber\\
+& + \beta_3 \Big(
+      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
+      + C^2 \big(\tfrac{q_2(q_2+1)}{2} + q_2 s_2 + s_2^2\big)
+    \Big)
+  + \beta_6
+  + \beta_7 \big(6 + \Delta_{i,1} + \Delta_{i,2}\big)
+\label{eq:req2-latency}
+\end{align}
+\end{lemma}
+
+\begin{proof}
+Start from \eqref{eq:e2e-param}. Since requests are issued sequentially, $(i,2)$ experiences no queueing from other requests; its busy-loop contribution is the sum of $\lambda_j$ over iterations in which $(i,2)$ is in prefill.
+
+\emph{(i) Prefill structure and iteration count.}
+Request $(i,2)$ is prefill-only with a two-segment input: 
+a cached prefix of length $4 + \Delta_{i,1}$ (identical to $(i,1)$) and 
+a new segment of length $1 + \Delta_{i,2}$. Only the \emph{new} tokens are chunked, 
+so the number of prefill iterations is $r_2 = \lceil (1 + \Delta_{i,2})/C \rceil$, 
+giving the fixed cost $\beta_0 r_2$. Because cached tokens are already present at the 
+first prefill iteration, the first-chunk hit term contributes $\beta_1 (4 + \Delta_{i,1})$.
+
+\emph{(ii) Linear per-miss work.}
+Exactly $1 + \Delta_{i,2}$ tokens are new, yielding the 
+linear term $\beta_2 (1 + \Delta_{i,2})$.
+
+\emph{(iii) Quadratic prefill work.}
+Split the new segment into $q_2$ full chunks of size $C$ and one 
+final partial chunk of size $s_2C$ (with $s_2 = 0$ implying no partial chunk).
+For a full chunk $t=1, \ldots, q_2$, the new tokens (misses) are $C$ and the 
+cached tokens (hits) are $(4 + \Delta_{i,1}) + (t-1)C$ (the prefix plus prior new tokens). 
+Hence the quadratic contribution per full chunk is
+\[
+\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
+= C\big((4 + \Delta_{i,1}) + (t-1)C\big) + C^2
+= C(4 + \Delta_{i,1}) + C^2 t.
+\]
+Summing over $t=1$ to $q_2$ gives $C(4 + \Delta_{i,1}) q_2 + C^2 \tfrac{q_2(q_2 + 1)}{2}$.
+If $s_2 > 0$, the partial chunk contributes
+$s_2 C \cdot ((4 + \Delta_{i,1}) + q_2C) + (s_2C)^2
+= C (4 + \Delta_{i,1}) s_2 + C^2 (q_2 s_2 + s_2^2)$.
+Combining full and partial chunks,
+\[
+\sum \big(\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2\big)
+= (4 + \Delta_{i,1})(1 + \Delta_{i,2}) + C^2 \Big(\tfrac{q_2 (q_2 + 1)}{2} + q_2 s_2 + s_2^2 \Big)
+\]
+which yields the $\beta_3$ term in \eqref{eq:req2-latency}.
+
+\emph{(iv) Decode and completion terms.}
+There is no decode, so $\beta_4, \beta_5$ do not appear. 
+The request finishes at the end of its last prefill iteration, 
+contributing one completion event ($\beta_6$) and a length-proportional cost 
+$\beta_7 L^{\text{fin}}$. At finish, the context contains all input tokens 
+plus the single output token generated at prefill completion, 
+i.e., $L^{\text{fin}} = (5 + \Delta_{i,1} + \Delta_{i,2}) + 1 = 6 + \Delta_{i,1} + \Delta_{i,2}$.
+
+\emph{(v) Ingress/egress and API costs.}
+These contribute $\alpha_0 + \alpha_1 (5 + \Delta_{i,1} + \Delta_{i,2}) + \alpha_2$.
+
+Collecting all contributions gives \eqref{eq:req2-latency}.
+\end{proof}
+
+
 
 \iffalse
 
