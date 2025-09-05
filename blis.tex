@@ -136,35 +136,35 @@ requests have this set to a number greater than $1$.
 The life of an inference request in the system passes through multiple stages 
 as  illustrated in Figure \ref{fig:req-lifecycle} and described below.
 
-\paragraph{1. Ingress.}
+\paragraph*{1. Ingress.}
 The client emits an inference request $i$ to the server. This contributes 
 a network latency that depends linearly on the number of input tokens 
 $\ell_i^{\text{in}}$.
 
-\paragraph{2. Pre-process.}
+\paragraph*{2. Pre-process.}
 Upon arrival, the API server tokenizes the prompt, performs light
 validation, and enqueues the request into the message queue. This contributes 
 a latency that depends linearly on $\ell_i^{\text{in}}$.
 
-\paragraph{3. Scheduling.} The request waits in the queue until there is 
+\paragraph*{3. Scheduling.} The request waits in the queue until there is 
 sufficient GPU capacity. During this waiting period, other requests get to participate
 in the busy loop iterations.
 
-\paragraph{4. Chunked prefill.} The uncached portion of this request is 
+\paragraph*{4. Chunked prefill.} The uncached portion of this request is 
 prefilled one chunk at a time. The latency of this stage equals the sum of the 
 duration of the busy loop iterations in which this request prefills.
 
-\paragraph{5. Decode.} The latency of this stage equals the sum of the duration
+\paragraph*{5. Decode.} The latency of this stage equals the sum of the duration
 of the busy loop iterations in which this request is in its decode phase. 
 The first output token is generated during the prefill phase, and subsequent 
 tokens are generated in the decode iterations.
 
-\paragraph{6. Post-process.} Once all output tokens are produced, 
+\paragraph*{6. Post-process.} Once all output tokens are produced, 
 the API server detokenizes them and
 packages the final response. The latency of this stage depends linearly on the 
 number of output tokens $\ell_i^{\text{out}}$.
 
-\paragraph{7. Egress.}
+\paragraph*{7. Egress.}
 The server emits response $i$ to the
 client. This contributes a network latency that depends linearly 
 on the number of output tokens $\ell_i^{\text{out}}$.
@@ -203,7 +203,7 @@ Define the following request sets.
 Let $\ell_{j,i}$ denote the context length of request $i$ at the 
 start of iteration $j$.
 
-\paragraph{Quadratic prefill term.} We define a quadratic term as follows.
+\paragraph*{Quadratic prefill term.} We define a quadratic term as follows.
 \begin{align}
 \psi_j
   = \sum_{i \in \mathcal{P}_j}
@@ -214,7 +214,7 @@ start of iteration $j$.
 \label{eq:quad}
 \end{align}
 
-\paragraph{Latency model.}
+\paragraph*{Latency model.}
 Let $L^{\text{dec}}_j=\sum_{i\in\mathcal{D}_j}\ell_{j,i}$ be the total decode
 context length in iteration $j$, and
 $L^{\text{fin}}_j=\sum_{i\in\mathcal{F}_j}\ell_{j,i}$ the total context length of
@@ -233,7 +233,7 @@ We model the iteration time as
 \label{eq:busy-loop-expanded}
 \end{align}
 
-\paragraph{Justification.} Each busy-loop iteration mixes four kinds of work.
+\paragraph*{Justification.} Each busy-loop iteration mixes four kinds of work.
 
 \begin{enumerate}
   \item \emph{Fixed work.} An iteration-invariant cost (\(\beta_0\)).
@@ -275,10 +275,10 @@ in Scenario 3.
 
 Scenario~3 involves generating request quadruples (``quads'').  
 
-\paragraph{Setup.}
+\paragraph*{Setup.}
 Unless otherwise specified, all lengths are in tokens. 
-Fix a chunk size $C \in \{256, 512, 1024, 2048, 4096\}$, 
-a block size $b \in \{8, 16, 32\}$, and maximum sequence length 
+Fix a chunk size $C\in\{256,512,1024,2048,4096\}$, 
+a block size $b\in\{8,16,32\}$, and maximum sequence length 
 $M = 8192$ blocks.
 
 Each quad $i$ consists of four requests $(i,1)$, $(i,2)$, $(i,3)$, and $(i,4)$.
@@ -335,7 +335,7 @@ $(i,4)$ & $[= (i,1)], [1 + \Delta_{i,2}]$
 \end{table}
 
 
-\paragraph{Sampling.}
+\paragraph*{Sampling.}
 Requests in a quad have a maximum length budget of $M$ that must be divided across input segments and output, 
 with variability. We therefore sample the $\Delta$s using a Dirichlet–Multinomial: 
 a Dirichlet distribution enforces the simplex constraint and provides a 
