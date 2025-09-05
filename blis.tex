@@ -358,17 +358,17 @@ for Segment~2 or output). The sampler is given in Algorithm~\ref{algo:sc3sampler
 
 \begin{lemma}[Latency of request $(i,1)$]
 \label{lemma:req1-latency}
-Let $q=\left\lfloor \frac{4 + \Delta_{i,1}}{C} \right\rfloor$, 
-$r=\left\lceil \frac{4 + \Delta_{i,1}}{C} \right\rceil$, and 
-$s=\frac{4 + \Delta_{i,1}}{C} - q\in[0,1)$.
+Let $q_1 = \left\lfloor \frac{4 + \Delta_{i,1}}{C} \right\rfloor$, 
+$r_1 = \left\lceil \frac{4 + \Delta_{i,1}}{C} \right\rceil$, and 
+$s_1 = \frac{4 + \Delta_{i,1}}{C} - q_1 \in [0,1)$.
 Then, the end-to-end latency of request $(i,1)$ satisfies
 \begin{align}
 e_{i,1} & \approx \alpha_0
   + \alpha_1 (4 + \Delta_{i,1})
   + \alpha_2 \nonumber\\
-& + \beta_0 r
+& + \beta_0 r_1
   + \beta_2 (4 + \Delta_{i,1})
-  + \beta_3 C^2 \left(\frac{q(q+1)}{2} + q s + s^2\right)
+  + \beta_3 C^2 \left(\frac{q_1 (q_1 + 1)}{2} + q_1 s_1 + s_1^2\right)
   + \beta_6
   + \beta_7 (5 + \Delta_{i,1}) \label{eq:req1-latency}
 \end{align}
@@ -381,8 +381,9 @@ contribution is $\sum_j \lambda_j$ over the iterations in which $(i,1)$ is activ
 \emph{(i) Prefill-only structure.}
 Request $(i,1)$ shares no prefix with earlier requests by construction, so all its
 input tokens are uncached (misses). Since it is prefill-only, it participates in
-exactly $r=\lceil (4 + \Delta_{i,1})/C \rceil$ prefill iterations and no decode iterations.
-Thus, the fixed per-iteration cost contributes $\beta_0r$, while the first-prefill
+exactly $r_1 = \lceil (4 + \Delta_{i,1})/C \rceil$ prefill iterations and 
+no decode iterations.
+Thus, the fixed per-iteration cost contributes $\beta_0 r_1$, while the first-prefill
 hit term contributes $0$ (there are no hits in the first chunk).
 
 \emph{(ii) Linear per-miss work.}
@@ -390,26 +391,28 @@ All $4 + \Delta_{i,1}$ input tokens are new, giving the linear term
 $\beta_2 (4 + \Delta_{i,1})$.
 
 \emph{(iii) Quadratic prefill work.}
-Let the prefill be split into $q$ full chunks of size $C$ and one final partial
-chunk of size $sC$ (with $s = 0$ meaning no partial chunk). In chunk $t=1, \dots, q$,
+Let the prefill be split into $q_1$ full chunks of size $C$ and one final partial
+chunk of size $s_1 C$ (with $s_1 = 0$ meaning no partial chunk). 
+In chunk $t=1, \dots, q_1$,
 the request has $\chi^{\text{miss}} = C$ new tokens and $\chi^{\text{hit}} = (t-1)C$
 cached tokens from earlier chunks of the \emph{same} request. Hence
 \[
 \chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
 = C \cdot (t-1)C + C^2 = C^2 t
 \]
-Summing over $t = 1$ to $q$ yields $C^2 \cdot \frac{q(q + 1)}{2}$. If $s>0$, the last
-partial chunk has $\chi^{\text{miss}} = sC$ and $\chi^{\text{hit}} = qC$, contributing
-$C^2(qs + s^2)$. Together these give the quadratic term
-$\beta_3 C^2 \left( \frac{q(q + 1)}{2} + qs + s^2 \right)$.
+Summing over $t = 1$ to $q_1$ yields $C^2 \cdot \frac{q_1(q_1 + 1)}{2}$. 
+If $s_1 > 0$, the last
+partial chunk has $\chi^{\text{miss}} = s_1 C$ and $\chi^{\text{hit}} = q_1 C$, 
+contributing $C^2(q_1 s_1 + s_1^2)$. Together these give the quadratic term
+$\beta_3 C^2 \left( \frac{q_1(q_1 + 1)}{2} + q_1 s_1 + s_1^2 \right)$.
 
 \emph{(iv) Decode and completion terms.}
 There is no decode for a prefill-only request, so the $\beta_4$ and $\beta_5$
 terms are absent. The request finishes at the end of its last prefill iteration,
 so exactly one completion event occurs, contributing $\beta_6$ plus a cost that
 scales with the finished request’s context length. Using \eqref{eq:busy-loop-expanded},
-this adds $\beta_7 L^{\text{fin}}$, and for $(i,1)$, including the single output token at finish, 
-$L^{\text{fin}} = 5 + \Delta_{i,1}$, giving $\beta_7 (5 + \Delta_{i,1})$.
+this adds $\beta_7 L^{\text{fin}}$, and for $(i,1)$, including the single output 
+token at finish, $L^{\text{fin}} = 5 + \Delta_{i,1}$, giving $\beta_7 (5 + \Delta_{i,1})$.
 
 \emph{(v) Ingress/egress and API costs.}
 The linear ingress/egress/API terms contribute
