@@ -268,13 +268,13 @@ in Scenario 3.
 Scenario~3 involves generating request quadruples (``quads'').  
 
 \paragraph{Setup.}
+Unless otherwise specified, all lengths are in tokens. 
 Fix a chunk size $C \in \{256, 512, 1024, 2048, 4096\}$, 
-a block size $b \in \{8, 16, 32, 64, 128\}$, and maximum sequence length 
-$M = 8192 / b$ blocks.  
+a block size $b \in \{8, 16, 32\}$, and maximum sequence length 
+$M = 8192$ blocks.
 
-Each quad $i$ consists of four requests $(i,1)$, $(i,2)$, $(i,3)$, and $(i,4)$, 
-each comprising one or more segments. Requests within a quad may share prefixes, 
-while requests across quads do not. 
+Each quad $i$ consists of four requests $(i,1)$, $(i,2)$, $(i,3)$, and $(i,4)$.
+Requests within a quad may share prefixes, while requests across quads do not. 
 Requests are issued strictly sequentially; a request 
 is emitted by the client only after it receives the response to the previous request:
 $\ldots \to (i-1, 4) \to (i,1) \to (i,2) \to (i,3) \to (i,4) \to (i + 1,1) \to \ldots$ 
@@ -282,54 +282,53 @@ $\ldots \to (i-1, 4) \to (i,1) \to (i,2) \to (i,3) \to (i,4) \to (i + 1,1) \to \
 The input length, output length, and the content of the requests are as follows.
 
 \begin{enumerate}
-  \item $(i,1)$ is a prefill-only request with a single input segment of length 
-        $1 + \Delta_{i,1}$ blocks. Its first four tokens are distinct from the first four
-        tokens of any request in quads $\{1, 2, \ldots, i-1 \}$. This guarantees that
-        request $(i, 1)$ does not share a prefix with any previously generated requests. Its
-        maximum output length is set to $1$ token.
+  \item $(i,1)$ is a prefill-only request with input length 
+        $4 + \Delta_{i,1}$. Its first four tokens are distinct from the 
+        first four tokens of any request in quads $\{1, 2, \ldots, i-1 \}$. 
+        This guarantees that request $(i, 1)$ does not share a prefix with any 
+        previously generated requests. Its maximum output length is set to $1$.
   \item $(i,2)$ is a prefill-only request with two input segments, of total length 
-        $2 + \Delta_{i,1} + \Delta_{i,2}$ blocks. 
+        $5 + \Delta_{i,1} + \Delta_{i,2}$. 
         The first segment is identical to $(i,1)$; the second has length 
-        $1 + \Delta_{i,2}$ blocks. Its
-        maximum output length is set to $1$ token.
-  \item $(i,3)$ reuses the input of $(i,1)$. Its maximum output length is set to $1 + \Delta_{i,3}$ blocks.
+        $1 + \Delta_{i,2}$. Its maximum output length is set to $1$.
+  \item The input sequence of $(i,3)$ is identical to that of $(i,1)$. 
+        Its maximum output length is set to $1 + \Delta_{i,3}$.
   \item $(i,4)$ has two input segments. The first segment is identical to $(i,1)$.  
-        The second segment has length $1 + \Delta_{i,2}$ blocks, but its first token  
-        differs from the first token of the second segment in $(i,2)$. This guarantees that request 
-        $(i, 4)$ shares a prefix of length exactly $1 + \Delta_{i,1}$ blocks 
-        with other requests in this quad.
-        Its maximum output length is set to $1 + \Delta_{i,3}$ blocks.
+        The second segment has length $1 + \Delta_{i,2}$, but its first token  
+        differs from the first token of the second segment in $(i,2)$. 
+        This guarantees that request $(i, 4)$ shares a prefix of length exactly 
+        $4 + \Delta_{i,1}$ with other requests in this quad. Its maximum output length 
+        is set to $1 + \Delta_{i,3}$ blocks.
 \end{enumerate}
 
 The structure of the requests in the quad is summarized in the following table.
 
 \begin{table}[h]
 \centering
-\caption{Structure of requests in quad in Scenario~3. 
-Unless specified otherwise, lengths are in blocks; ``='' indicates a segment 
+\caption{Structure of requests in quad in Scenario 3; ``='' indicates a segment 
 that is identical to the $(i,1)$ input sequence.}
 \label{tab:quad-structure}
 \begin{tabular}{@{}c|c|c|c@{}}
 \toprule
 Request & Input Segments & Total Input & Output (max) \\ \midrule
-$(i,1)$ & $[\,1+\Delta_{i,1}\,]$ 
-        & $1+\Delta_{i,1}$ 
-        & 1 token (prefill only) \\
-$(i,2)$ & $[\,= (i,1)\,],\,[\,1+\Delta_{i,2}\,]$ 
-        & $2+\Delta_{i,1}+\Delta_{i,2}$ 
-        & 1 token (prefill only) \\
-$(i,3)$ & $[\,= (i,1)\,]$ 
-        & $1+\Delta_{i,1}$ 
+$(i,1)$ & $[4+\Delta_{i,1}]$ 
+        & $4+\Delta_{i,1}$ 
+        & 1 (prefill only) \\
+$(i,2)$ & $[= (i,1)], [1+\Delta_{i,2}]$ 
+        & $5+\Delta_{i,1}+\Delta_{i,2}$ 
+        & 1 (prefill only) \\
+$(i,3)$ & $[= (i,1)\,]$ 
+        & $4+\Delta_{i,1}$ 
         & $1+\Delta_{i,3}$ \\
-$(i,4)$ & $[\,= (i,1)\,],\,[\,1+\Delta_{i,2}]$
-        & $2+\Delta_{i,1}+\Delta_{i,2}$ 
+$(i,4)$ & $[= (i,1)], [1+\Delta_{i,2}]$
+        & $5+\Delta_{i,1}+\Delta_{i,2}$ 
         & $1+\Delta_{i,3}$ \\ \bottomrule
 \end{tabular}
 \end{table}
 
 
 \paragraph{Sampling.}
-Requests in a quad have a fixed length budget of $M$ blocks that must be divided across input segments and output, 
+Requests in a quad have a maximum length budget of $M$ that must be divided across input segments and output, 
 with variability. We therefore sample the $\Delta$s using a Dirichlet–Multinomial: 
 a Dirichlet distribution enforces the simplex constraint and provides a 
 single concentration knob to control balanced vs. skewed splits, and the Multinomial yields integer lengths. 
@@ -340,7 +339,7 @@ for Segment~2 or output). The sampler is given in Algorithm~\ref{algo:sc3sampler
   \caption{Segment lengths sampler in Scenario 3 (Dirichlet–Multinomial)}
   \label{algo:sc3sampler}
   \begin{algorithmic}[1]
-    \Require Budget in blocks $M-3$; concentration $\boldsymbol{\eta}=(\eta_1,\eta_2,\eta_3)$
+    \Require Budget $N = M-6$; concentration $\boldsymbol{\eta}=(\eta_1,\eta_2,\eta_3)$
     \State Sample proportions $\mathbf{p} \sim \mathrm{Dirichlet}(\boldsymbol{\eta})$
     \State Sample counts $(\Delta_{i,1},\Delta_{i,2},\Delta_{i,3}) \sim \mathrm{Multinomial}\left(N,\mathbf{p}\right)$
     \State \textbf{return} $\Delta_{i,1}, \Delta_{i,2}, \Delta_{i,3}$
