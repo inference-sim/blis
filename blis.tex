@@ -179,9 +179,9 @@ with a high-level model for the end-to-end latency as follows.
 e_i \approx \alpha_0
  + \alpha_1\, t_i^{\text{in}}
  + \alpha_2\, t_i^{\text{out}}
- + \sum_{j \in \mathcal{S}_i} \lambda_j
- + \sum_{j \in \mathcal{P}_i} \lambda_j
- + \sum_{j \in \mathcal{D}_i} \lambda_j
+ + \sum_{\text{i waits at j}} \lambda_j
+ + \sum_{\text{i prefills at j}} \lambda_j
+ + \sum_{\text{i decodes at j}} \lambda_j
 \label{eq:e2e-param}
 \end{align}
 
