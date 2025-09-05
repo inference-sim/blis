@@ -139,12 +139,12 @@ as  illustrated in Figure \ref{fig:req-lifecycle} and described below.
 \paragraph{1. Ingress.}
 The client emits an inference request $i$ to the server. This contributes 
 a network latency that depends linearly on the number of input tokens 
-$t_i^{\text{in}}$.
+$\ell_i^{\text{in}}$.
 
 \paragraph{2. Pre-process.}
 Upon arrival, the API server tokenizes the prompt, performs light
 validation, and enqueues the request into the message queue. This contributes 
-a latency that depends linearly on $t_i^{\text{in}}$.
+a latency that depends linearly on $\ell_i^{\text{in}}$.
 
 \paragraph{3. Scheduling.} The request waits in the queue until there is 
 sufficient GPU capacity. During this waiting period, other requests get to participate
@@ -162,12 +162,12 @@ tokens are generated in the decode iterations.
 \paragraph{6. Post-process.} Once all output tokens are produced, 
 the API server detokenizes them and
 packages the final response. The latency of this stage depends linearly on the 
-number of output tokens $t_i^{\text{out}}$.
+number of output tokens $\ell_i^{\text{out}}$.
 
 \paragraph{7. Egress.}
 The server emits response $i$ to the
 client. This contributes a network latency that depends linearly 
-on the number of output tokens $t_i^{\text{out}}$.
+on the number of output tokens $\ell_i^{\text{out}}$.
 
 \subsection{End-to-End request latency model}
 \label{subsec:end-to-end-latency-model}
@@ -177,8 +177,8 @@ with a high-level model for the end-to-end latency as follows.
 
 \begin{align}
 e_i \approx \alpha_0
- + \alpha_1\, t_i^{\text{in}}
- + \alpha_2\, t_i^{\text{out}}
+ + \alpha_1 \ell_i^{\text{in}}
+ + \alpha_2 \ell_i^{\text{out}}
  + \sum_{\text{i waits at j}} \lambda_j
  + \sum_{\text{i prefills at j}} \lambda_j
  + \sum_{\text{i decodes at j}} \lambda_j
@@ -190,7 +190,7 @@ where $\varepsilon$ is a residual noise term. Regression equations such
 as \eqref{eq:e2e-param} are understood to hold up to residual noise term.
 
 
-\subsubsection{Busy-loop latency model}
+\subsubsection{Busy loop}
 \label{subsubsec:busy-loop-latency-model}
 Let $\chi_{j,i}^{\text{hit}}$ and $\chi_{j,i}^{\text{miss}}$ be the numbers of 
 cached and uncached (new) tokens of request $i$ during iteration $j$.
@@ -320,18 +320,18 @@ that is identical to the $(i,1)$ input sequence.}
 \begin{tabular}{@{}c|c|c|c@{}}
 \toprule
 Request & Input Segments & Total Input & Output (max) \\ \midrule
-$(i,1)$ & $[4+\Delta_{i,1}]$ 
-        & $4+\Delta_{i,1}$ 
+$(i,1)$ & $[4 + \Delta_{i,1}]$ 
+        & $4 + \Delta_{i,1}$ 
         & 1 (prefill only) \\
-$(i,2)$ & $[= (i,1)], [1+\Delta_{i,2}]$ 
-        & $5+\Delta_{i,1}+\Delta_{i,2}$ 
+$(i,2)$ & $[= (i,1)], [1 + \Delta_{i,2}]$ 
+        & $5 + \Delta_{i,1} + \Delta_{i,2}$ 
         & 1 (prefill only) \\
-$(i,3)$ & $[= (i,1)\,]$ 
-        & $4+\Delta_{i,1}$ 
-        & $1+\Delta_{i,3}$ \\
-$(i,4)$ & $[= (i,1)], [1+\Delta_{i,2}]$
-        & $5+\Delta_{i,1}+\Delta_{i,2}$ 
-        & $1+\Delta_{i,3}$ \\ \bottomrule
+$(i,3)$ & $[= (i,1)]$ 
+        & $4 + \Delta_{i,1}$ 
+        & $1 + \Delta_{i,3}$ \\
+$(i,4)$ & $[= (i,1)], [1 + \Delta_{i,2}]$
+        & $5 + \Delta_{i,1} + \Delta_{i,2}$ 
+        & $1 + \Delta_{i,3}$ \\ \bottomrule
 \end{tabular}
 \end{table}
 
@@ -348,96 +348,86 @@ for Segment~2 or output). The sampler is given in Algorithm~\ref{algo:sc3sampler
   \caption{Segment lengths sampler in Scenario 3 (Dirichlet–Multinomial)}
   \label{algo:sc3sampler}
   \begin{algorithmic}[1]
-    \Require Budget $N = M-6$; concentration $\boldsymbol{\eta}=(\eta_1,\eta_2,\eta_3)$
+    \Require Budget $N = M - 6$; concentration $\boldsymbol{\eta}=(\eta_1, \eta_2, \eta_3)$
     \State Sample proportions $\mathbf{p} \sim \mathrm{Dirichlet}(\boldsymbol{\eta})$
-    \State Sample counts $(\Delta_{i,1},\Delta_{i,2},\Delta_{i,3}) \sim \mathrm{Multinomial}\left(N,\mathbf{p}\right)$
+    \State Sample counts $(\Delta_{i,1}, \Delta_{i,2}, \Delta_{i,3}) \sim \mathrm{Multinomial}\left(N, \mathbf{p}\right)$
     \State \textbf{return} $\Delta_{i,1}, \Delta_{i,2}, \Delta_{i,3}$
   \end{algorithmic}
 \end{algorithm}
 
-\iffalse
 
-\begin{lemma}
-\label{lemma:scenario3}
-In Scenario 3, the end-to-end latency \eqref{eq:e2e-param} for the four requests 
-in quad $i$ reduces to:
+\begin{lemma}[Latency of request $(i,1)$]
+\label{lemma:req1-latency}
+Let $q=\left\lfloor \frac{4 + \Delta_{i,1}}{C} \right\rfloor$, 
+$r=\left\lceil \frac{4 + \Delta_{i,1}}{C} \right\rceil$, and 
+$s=\frac{4 + \Delta_{i,1}}{C} - q\in[0,1)$.
+Then, the end-to-end latency of request $(i,1)$ satisfies
 \begin{align}
-e_{i,1} &\approx 
-\alpha_0 
-+ \alpha_1(1+\Delta_{i,1}) b
-+ \alpha_2 
-+ \sum_{j \in \mathcal{P}_{i,1}} \lambda_j \label{eq:sc3mem1}\\
-e_{i,2} &\approx 
-\alpha_0 
-+ \alpha_1 (2+\Delta_{i,1}+\Delta_{i,2}) b
-+ \alpha_2 
-+ \sum_{j \in \mathcal{P}_{i,2}} \lambda_j \label{eq:sc3mem2}\\
-e_{i,3} &\approx 
-\alpha_0 
-+ \alpha_1 (1+\Delta_{i,1}) b
-+ \alpha_2\, t^{\text{out}}_{i,3}
-+ \sum_{j \in \mathcal{P}_{i,3}} \lambda_j
-+ \sum_{j \in \mathcal{D}_{i,3}} \lambda_j
-\label{eq:sc3mem3}\\
-e_{i,4} &\approx 
-\alpha_0 
-+ \alpha_1 (2+\Delta_{i,1}+\Delta_{i,2}) b
-+ \alpha_2\, t^{\text{out}}_{i,4}
-+ \sum_{j \in \mathcal{P}_{i,4}} \lambda_j
-+ \sum_{j \in \mathcal{D}_{i,4}} \lambda_j
-\label{eq:sc3mem4}
+e_{i,1} & \approx \alpha_0
+  + \alpha_1 (4 + \Delta_{i,1})
+  + \alpha_2 \nonumber\\
+& + \beta_0 r
+  + \beta_2 (4 + \Delta_{i,1})
+  + \beta_3 C^2 \left(\frac{q(q+1)}{2} + q s + s^2\right)
+  + \beta_6
+  + \beta_7 (5 + \Delta_{i,1}) \label{eq:req1-latency}
 \end{align}
 \end{lemma}
 
 \begin{proof}
-~\newline
-\noindent\textbf{1) No scheduling delay.} In Scenario 3, a request is emitted only after the previous request finishes. 
-Hence, $\mathcal{S}_{i,k}=\varnothing$ and $\sum_{j\in\mathcal{S}_{i,k}} \lambda_j=0$ for 
-$k\in\{1,2,3,4\}$.
+Start from the end-to-end model \eqref{eq:e2e-param}, where the busy-loop
+contribution is $\sum_j \lambda_j$ over the iterations in which $(i,1)$ is active.
 
-\noindent\textbf{2) Input tokens.} Segment lengths are in blocks; converting to 
-tokens with block size $b$:
-\begin{align*}
-t^{\text{in}}_{i,1} & = & (1+\Delta_{i,1}) b \\
-t^{\text{in}}_{i,2} & = & (2+\Delta_{i,1}+\Delta_{i,2}) b \\
-t^{\text{in}}_{i,3} & = & (1+\Delta_{i,1}) b \\
-t^{\text{in}}_{i,4} & = & (2+\Delta_{i,1}+\Delta_{i,2})b
-\end{align*}
+\emph{(i) Prefill-only structure.}
+Request $(i,1)$ shares no prefix with earlier requests by construction, so all its
+input tokens are uncached (misses). Since it is prefill-only, it participates in
+exactly $r=\lceil (4 + \Delta_{i,1})/C \rceil$ prefill iterations and no decode iterations.
+Thus, the fixed per-iteration cost contributes $\beta_0r$, while the first-prefill
+hit term contributes $0$ (there are no hits in the first chunk).
 
-\noindent\textbf{3) Prefill-only requests.} Requests $(i, 1)$ and $(i, 2)$ are prefill-only. 
-Hence, $\mathcal{D}_{i,1}=\mathcal{D}_{i,2}=\varnothing$ and 
-$t^{\text{out}}_{i,1}=t^{\text{out}}_{i,2}=1$.
-~\newline
-~\newline
-\noindent Substituting these facts into \eqref{eq:e2e-param} gives 
-\eqref{eq:sc3mem1}–\eqref{eq:sc3mem4}.
+\emph{(ii) Linear per-miss work.}
+All $4 + \Delta_{i,1}$ input tokens are new, giving the linear term
+$\beta_2 (4 + \Delta_{i,1})$.
+
+\emph{(iii) Quadratic prefill work.}
+Let the prefill be split into $q$ full chunks of size $C$ and one final partial
+chunk of size $sC$ (with $s = 0$ meaning no partial chunk). In chunk $t=1, \dots, q$,
+the request has $\chi^{\text{miss}} = C$ new tokens and $\chi^{\text{hit}} = (t-1)C$
+cached tokens from earlier chunks of the \emph{same} request. Hence
+\[
+\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
+= C \cdot (t-1)C + C^2 = C^2 t
+\]
+Summing over $t = 1$ to $q$ yields $C^2 \cdot \frac{q(q + 1)}{2}$. If $s>0$, the last
+partial chunk has $\chi^{\text{miss}} = sC$ and $\chi^{\text{hit}} = qC$, contributing
+$C^2(qs + s^2)$. Together these give the quadratic term
+$\beta_3 C^2 \left( \frac{q(q + 1)}{2} + qs + s^2 \right)$.
+
+\emph{(iv) Decode and completion terms.}
+There is no decode for a prefill-only request, so the $\beta_4$ and $\beta_5$
+terms are absent. The request finishes at the end of its last prefill iteration,
+so exactly one completion event occurs, contributing $\beta_6$ plus a cost that
+scales with the finished request’s context length. Using \eqref{eq:busy-loop-expanded},
+this adds $\beta_7 L^{\text{fin}}$, and for $(i,1)$, including the single output token at finish, 
+$L^{\text{fin}} = 5 + \Delta_{i,1}$, giving $\beta_7 (5 + \Delta_{i,1})$.
+
+\emph{(v) Ingress/egress and API costs.}
+The linear ingress/egress/API terms contribute
+$\alpha_0 + \alpha_1(4 + \Delta_{i,1}) + \alpha_2$ (the last because the maximum
+output is $1$).
+
+Collecting all nonzero contributions gives \eqref{eq:req1-latency}.
 \end{proof}
 
-\begin{lemma}[Latency of request $(i,1)$]
-\label{lemma:req1-latency}
-Let the size of request $(i, 1)$ in chunks be $m_{i,1} \doteq \frac{(1 + \Delta_{i,1})b}{C}$. 
-The end-to-end latency of request $(i,1)$ satisfies
-\begin{align*}
-e_{i,1} & \approx \alpha_0 + \alpha_2 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
-        & + \alpha_1 m_{i,1} C 
-        + \beta_0 \lceil m_{i,1} \rceil 
-        + \beta_2 m_{i,1} C 
-        + \beta_5 \frac{m_{i,1}C}{b} 
-        + \beta_6 \frac{C^2}{b^2}
-        \left(
-          \frac{\lfloor m_{i,1} \rfloor + m_{i,1}^2}{2}
-          + \frac{\big(m_{i,1}-\lfloor m_{i,1}\rfloor\big)^2}{2}
-        \right)
-\end{align*}
-\end{lemma}
 
+\iffalse
 
 \begin{proof}[Proof of Lemma~\ref{lemma:req1-latency}]
 By Scenario~3, request $(i,1)$ is prefill-only, shares no prefix with any
 previous request, and emits exactly one output token. Specializing the
 end-to-end model \eqref{eq:e2e-param} (and using \eqref{eq:sc3mem1}) gives
 \[
-e_{i,1}\;\approx\; \alpha_0 \;+\; \alpha_1\,t^{\text{in}}_{i,1} \;+\; \alpha_2 \;+\; 
+e_{i,1}\;\approx\; \alpha_0 \;+\; \alpha_1t^{\text{in}}_{i,1} \;+\; \alpha_2 \;+\; 
 \sum_{j\in\mathcal{P}_{i,1}} \lambda_j,
 \qquad
 t^{\text{in}}_{i,1}=(1+\Delta_{i,1})b \doteq m_{i,1} C.
