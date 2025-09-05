@@ -197,14 +197,14 @@ cached and uncached (new) tokens of request $i$ during iteration $j$.
 Define the following request sets.
 \begin{align*}
   \mathcal{P}_j & = & \{i:\text{$i$ is in prefill at $j$}\} \nonumber \\
-  \mathcal{P}^{(1)}_j & = & \{i:\text{$i$ is in its first prefill chunk at $j$}\} \nonumber \\
+  \mathcal{B}^{(1)}_j & = & \{i:\text{$i$ is in its first busy loop iteration at $j$}\} \nonumber \\
   \mathcal{D}_j & = & \{i:\text{$i$ is decoding at $j$}\} \nonumber \\
   \mathcal{F}_j & = & \{i:\text{$i$ finishes at $j$}\}
 \end{align*}
 Let $\ell_{j,i}$ denote the context length of request $i$ at the 
 start of iteration $j$.
 
-\paragraph{Quadratic prefill term.}
+\paragraph{Quadratic prefill term.} We define a quadratic term as follows.
 \begin{align}
 \psi_j
   = \sum_{i \in \mathcal{P}_j}
@@ -224,7 +224,7 @@ We model the iteration time as
 \begin{align}
 \lambda_j 
   \approx \beta_0
-  + \beta_1 \sum_{i \in \mathcal{P}^{(1)}_j} \chi_{j,i}^{\text{hit}}
+  + \beta_1 \sum_{i \in \mathcal{B}^{(1)}_j} \chi_{j,i}^{\text{hit}}
   + \beta_2 \sum_{i \in \mathcal{P}_j}      \chi_{j,i}^{\text{miss}}
   + \beta_3 \psi_j 
   + \beta_4 |\mathcal{D}_j|
@@ -449,7 +449,9 @@ e_{i,2} & \approx \alpha_0
 \end{lemma}
 
 \begin{proof}
-Start from \eqref{eq:e2e-param}. Since requests are issued sequentially, $(i,2)$ experiences no queueing from other requests; its busy-loop contribution is the sum of $\lambda_j$ over iterations in which $(i,2)$ is in prefill.
+Start from \eqref{eq:e2e-param}. Since requests are issued sequentially, 
+$(i,2)$ experiences no queueing from other requests; its busy-loop contribution 
+is the sum of $\lambda_j$ over iterations in which $(i,2)$ is in prefill.
 
 \emph{(i) Prefill structure and iteration count.}
 Request $(i,2)$ is prefill-only with a two-segment input: 
@@ -499,276 +501,149 @@ These contribute $\alpha_0 + \alpha_1 (5 + \Delta_{i,1} + \Delta_{i,2}) + \alpha
 Collecting all contributions gives \eqref{eq:req2-latency}.
 \end{proof}
 
-
-
-\iffalse
-
-\begin{proof}[Proof of Lemma~\ref{lemma:req1-latency}]
-By Scenario~3, request $(i,1)$ is prefill-only, shares no prefix with any
-previous request, and emits exactly one output token. Specializing the
-end-to-end model \eqref{eq:e2e-param} (and using \eqref{eq:sc3mem1}) gives
-\[
-e_{i,1}\;\approx\; \alpha_0 \;+\; \alpha_1t^{\text{in}}_{i,1} \;+\; \alpha_2 \;+\; 
-\sum_{j\in\mathcal{P}_{i,1}} \lambda_j,
-\qquad
-t^{\text{in}}_{i,1}=(1+\Delta_{i,1})b \doteq m_{i,1} C.
-\]
-Thus it suffices to evaluate $\sum_{j\in\mathcal{P}_{i,1}} \lambda_j$ using the
-busy-loop model \eqref{eq:busy-loop-expanded}.
-
-\paragraph{(1) Number of iterations and per-iteration intercept.}
-Prefill is processed in chunks of $C$ tokens. With $m_{i,1} \doteq
-\frac{(1+\Delta_{i,1})b}{C}$, there are $q\!\doteq\!\lfloor m_{i,1}\rfloor$
-full chunks and an optional fractional chunk of size $rC$ tokens where
-$r\doteq m_{i,1}-q\in[0,1)$. Hence the request participates in
-$\lceil m_{i,1}\rceil$ iterations, contributing
-\[
-\sum_{j\in\mathcal{P}_{i,1}} \beta_0 \;=\; \beta_0\,\lceil m_{i,1}\rceil.
-\]
-
-\paragraph{(2) Scheduling features.}
-By construction of the features, the admission indicator aggregates to one per
-request, while the token-count feature aggregates to the total processed input
-tokens:
-\[
-\sum_{j\in\mathcal{P}_{i,1}} \beta_1 \rho_j \;=\; \beta_1,
-\qquad
-\sum_{j\in\mathcal{P}_{i,1}} \beta_2 \tau_j \;=\; \beta_2\,t^{\text{in}}_{i,1}
-\;=\; \beta_2\,m_{i,1}C.
-\]
-
-\paragraph{(3) Prefill features (non-quadratic).}
-There are no ``new hits'' for $(i,1)$, so $\sum_j \chi_{j,i}^{\text{hit,new}}=0$.
-Every block is a miss exactly once, so $\sum_j \chi_{j,i}^{\text{miss}}
-=1+\Delta_{i,1}$. The batch-formation indicator contributes once:
-\[
-\sum_{j\in\mathcal{P}_{i,1}} \beta_3 \pi_j = \beta_3
-\qquad
-\sum_{j\in\mathcal{P}_{i,1}} \beta_5 \chi_{j,i}^{\text{miss}} 
-= \beta_5 (1+\Delta_{i,1})
-= \beta_5 \frac{m_{i,1}C}{b}
-\]
-
-\paragraph{(4) Prefill quadratic term.}
-In iteration $k\in\{1,\ldots,q\}$ (the $k$-th full chunk), the \emph{missed}
-blocks equal $C/b$ and the \emph{hit} blocks equal $(k-1)\,C/b$. Therefore
-\[
-\chi_{j,i}^{\text{miss}}\cdot \chi_{j,i}^{\text{hit}}
-+ \big(\chi_{j,i}^{\text{miss}}\big)^2
-\;=\; \Big(\frac{C}{b}\Big)^2 k.
-\]
-Summing over full chunks yields
-\(
-\big(\frac{C}{b}\big)^2 \sum_{k=1}^{q} k
-= \big(\frac{C}{b}\big)^2 \frac{q(q+1)}{2}.
-\)
-
-If $r>0$, the final partial chunk has miss $rC/b$ and hit $qC/b$, contributing
-$\big(\frac{C}{b}\big)^2(q r + r^2)$. Hence,
-\[
-\sum_{j\in\mathcal{P}_{i,1}} \beta_6 \psi_j
-=
-\beta_6 \frac{C^2}{b^2}\!\left(
-\frac{\lfloor m_{i,1}\rfloor + m_{i,1}^2}{2}
-+\frac{(m_{i,1}-\lfloor m_{i,1}\rfloor)^2}{2}
-\right).
-\]
-
-\paragraph{(5) Decode and completion features.}
-There is no decode for $(i,1)$, so the $\beta_7$ and $\beta_8$ terms vanish, as
-does $\beta_{10}$. Prefill completes once and the request finishes once:
-\[
-\sum_{j\in\mathcal{P}_{i,1}} \beta_9 \rho_j^{\text{pre-fin}} \;=\; \beta_9,
-\qquad
-\sum_{j\in\mathcal{P}_{i,1}} \beta_{11} \tau_j^{\text{fin}} \;=\; \beta_{11}.
-\]
-
-Combining (1)–(5) with $t^{\text{in}}_{i,1}=m_{i,1}C$ yields the Lemma.
-\end{proof}
-
-\begin{lemma}[Latency of request $(i,2)$]
-\label{lemma:req2-latency}
-Let
-\[
-m_{i,1}\doteq \frac{(1+\Delta_{i,1})b}{C},
-\qquad
-m_{i,2}\doteq \frac{(2+\Delta_{i,1}+\Delta_{i,2})b}{C},
-\qquad
-d_i \doteq m_{i,2}-m_{i,1}=\frac{(1+\Delta_{i,2})b}{C}.
-\]
-Then the end-to-end latency of request $(i,2)$ satisfies
-\begin{align*}
-e_{i,2}
-&\approx \alpha_0 + \alpha_2 + \beta_1 + \beta_3 + \beta_9 + \beta_{11} \\
-&\quad + \alpha_1\, m_{i,2} C
-       + \beta_0\, \lceil d_i \rceil
-       + \beta_2\, d_i C
-       + \beta_4\, \frac{m_{i,1}C}{b}
-       + \beta_5\, \frac{d_i C}{b} \\
-&\quad + \beta_6\, \frac{C^2}{b^2}\left(
-            \frac{m_{i,2}^2 - m_{i,1}^2}{2}
-          + \frac{\lfloor d_i \rfloor + (d_i-\lfloor d_i \rfloor)^2}{2}
-        \right).
-\end{align*}
-\end{lemma}
-
-\begin{proof}
-By Scenario~3, $(i,2)$ is prefill-only, with two segments: the first equals
-$(i,1)$ (prefix reuse), the second adds $(1+\Delta_{i,2})$ new blocks. From
-\eqref{eq:e2e-param} and \eqref{eq:sc3mem2},
-\[
-e_{i,2}\approx \alpha_0 + \alpha_1 t^{\text{in}}_{i,2} + \alpha_2
-               + \sum_{j\in\mathcal{P}_{i,2}} \lambda_j,
-\quad
-t^{\text{in}}_{i,2}=(2+\Delta_{i,1}+\Delta_{i,2})b = m_{i,2}C.
-\]
-Thus we evaluate $\sum_{j\in\mathcal{P}_{i,2}} \lambda_j$ using
-\eqref{eq:busy-loop-expanded}.
-
-\paragraph{(1) Iterations and per-iteration intercept.}
-The engine materializes \emph{only the new tokens} from the second segment.
-With $d_i=\frac{(1+\Delta_{i,2})b}{C}$, there are $q=\lfloor d_i\rfloor$
-full miss-chunks and a final partial of size $rC$ tokens where
-$r=d_i-q\in[0,1)$. Hence the prefill intercept contributes
-$\sum_{j\in\mathcal{P}_{i,2}} \beta_0 = \beta_0 \lceil d_i\rceil$.
-
-\paragraph{(2) Scheduling features.}
-The admission indicator aggregates to one per request, while the token-count
-feature aggregates to the \emph{new} tokens processed on GPU:
-\[
-\sum_{j} \beta_1 \rho_j = \beta_1,
-\qquad
-\sum_{j} \beta_2 \tau_j = \beta_2\, d_i C.
-\]
-
-\paragraph{(3) Prefill features (non-quadratic).}
-Prefix reuse contributes ``new hits'' of size equal to the reused first segment,
-and the second segment contributes misses:
-\[
-\sum_{j}\beta_4 \chi_{j,i}^{\text{hit,new}} = \beta_4\,\frac{m_{i,1}C}{b},
-\qquad
-\sum_{j}\beta_5 \chi_{j,i}^{\text{miss}}   = \beta_5\,\frac{d_i C}{b}.
-\]
-Batch-formation contributes once: $\sum_j \beta_3 \pi_j=\beta_3$.
-
-\paragraph{(4) Prefill quadratic term.}
-Let $s=\frac{C}{b}$ blocks per full chunk. In the $k$-th full miss-chunk
-($k=1,\ldots,q$), the miss is $s$ and the hit equals the reused prefix plus
-previous misses: $\frac{m_{i,1}C}{b} + (k-1)s$. The quadratic per-chunk term
-is $s\!\cdot\!\big(\frac{m_{i,1}C}{b}+(k-1)s\big) + s^2
-= s\!\cdot\!\frac{m_{i,1}C}{b} + s^2 k$.
-Summing full chunks and adding the partial ($r s$ miss, $q s$ additional hit)
-gives
-\[
-\frac{C^2}{b^2}\Big( m_{i,1} d_i + \frac{d_i^2 + q + r^2}{2} \Big)
-= \frac{C^2}{b^2}\left(
-\frac{m_{i,2}^2 - m_{i,1}^2}{2}
-+ \frac{\lfloor d_i \rfloor + (d_i-\lfloor d_i \rfloor)^2}{2}
-\right),
-\]
-using $m_{i,2}=m_{i,1}+d_i$ and $q=\lfloor d_i\rfloor$, $r=d_i-q$.
-
-\paragraph{(5) Decode and completion features.}
-There is no decode, so $\beta_7$ and $\beta_8$ vanish, as does $\beta_{10}$.
-Prefill completes once and the request finishes once:
-$\sum_j \beta_9 \rho_j^{\text{pre-fin}}=\beta_9$ and
-$\sum_j \beta_{11} \tau_j^{\text{fin}}=\beta_{11}$.
-
-Collecting all terms with $t^{\text{in}}_{i,2}=m_{i,2}C$ yields the claim.
-\end{proof}
-
 \begin{lemma}[Latency of request $(i,3)$]
 \label{lemma:req3-latency}
-Let
-\[
-m_{i,1}\doteq \frac{(1+\Delta_{i,1})b}{C},
-\qquad
-o_{i,3}\doteq t^{\text{out}}_{i,3}\;\;(\text{decode tokens}).
-\]
-Since $(i,3)$ reuses the entire input of $(i,1)$, its end-to-end latency satisfies
-\begin{align*}
-e_{i,3}
-&\approx \alpha_0 + \alpha_1\, m_{i,1} C + \alpha_2\, o_{i,3} \\
-&\quad + \beta_1 + \beta_3
-      + \beta_4\,\frac{m_{i,1}C}{b}
-      \\
-&\quad + (\beta_0 + \beta_7 + \beta_8)\,o_{i,3}
-      + \beta_{10} + \beta_{11}.
-\end{align*}
+Recall that $\ell_i^{\text{out}} \leq 1 + \Delta_{i,3}$ is the realized output length.
+Then the end-to-end latency of request $(i,3)$ satisfies
+\begin{align}
+e_{i,3} & \approx \alpha_0
+  + \alpha_1 \big(4 + \Delta_{i,1}\big)
+  + \alpha_2 \ell_i^{\text{out}} \nonumber \\
+& + \beta_0 \ell_i^{\text{out}}
+  + \beta_1 \big(4 + \Delta_{i,1}\big) \nonumber \\
+&  + \beta_4 \ell_i^{\text{out}}
+  + \beta_5 \cdot \frac{\ell_i^{\text{out}} \big( 2(4 + \Delta_{i,1}) + \ell_i^{\text{out}} - 1 \big)}{2}
+  + \beta_6
+  + \beta_7 \big(4 + \Delta_{i,1} + \ell_i^{\text{out}}\big)
+\label{eq:req3-latency}
+\end{align}
 \end{lemma}
 
 \begin{proof}
-From \eqref{eq:e2e-param} and \eqref{eq:sc3mem3},
-$e_{i,3}\approx \alpha_0 + \alpha_1 t^{\text{in}}_{i,3} + \alpha_2 o_{i,3}
-+ \sum_{j\in\mathcal{P}_{i,3}} \lambda_j + \sum_{j\in\mathcal{D}_{i,3}} \lambda_j$
-with $t^{\text{in}}_{i,3}=m_{i,1}C$.
-\textbf{Prefill:} APC reuses the entire prefix, so there are no prefill compute
-iterations: $\sum_{j\in\mathcal{P}_{i,3}}\beta_0=0$, $\sum\beta_2\tau_j=0$,
-$\sum\beta_5\chi^{\text{miss}}_{j,i}=0$, and no quadratic term. Attaching hits
-contributes $\sum\beta_4\chi^{\text{hit,new}}_{j,i}=\beta_4\,\frac{m_{i,1}C}{b}$.
-\textbf{Decode:} For a single active request, the number of decode steps equals
-$o_{i,3}$, hence $\sum \beta_0=\beta_0 o_{i,3}$, $\sum \beta_7\delta_j=\beta_7
-o_{i,3}$, and $\sum \beta_8 \tau_j^{\text{dec}}=\beta_8 o_{i,3}$. \textbf{Indicators:}
-We keep one-per-request admission/formation as $\beta_1+\beta_3$. There is no
-prefill completion, so $\beta_9$ vanishes; decode completion contributes
-$\beta_{10}$ and finalization contributes $\beta_{11}$. Collect terms.
-\end{proof}
+Start from \eqref{eq:e2e-param}. The input of $(i,3)$ equals $(i,1)$, so the entire
+prefix of length $4 + \Delta_{i,1}$ is cached.
 
+\emph{(i) First-iteration hit cost.}
+The engine must account for cached tokens
+once when the request first participates in the busy loop (a decode iteration here).
+This yields the hit term $\beta_1 (4 + \Delta_{i,1})$.
+
+\emph{(ii) No prefill-miss work.}
+There are no prefill iterations for $(i,3)$, so the $\beta_2$ and $\beta_3$ terms
+are absent.
+
+\emph{(iii) Decode iterations.}
+The request produces exactly $\ell_i^{\text{out}}$ tokens via decode, so there are
+$\ell_i^{\text{out}}$ iterations, contributing $\beta_0 \ell_i^{\text{out}}$ from fixed cost
+and $\beta_4 \ell_i^{\text{out}}$ from per-request overhead.
+
+\emph{(iv) Decode context-length work.}
+Decode iteration $t=0,\ldots,\ell_i^{\text{out}}-1$ sees context
+$ (4 + \Delta_{i,1}) + t$. Hence
+\[
+\sum \ell_{j,i}
+= \sum_{t=0}^{\ell_i^{\text{out}} - 1} \big(4 + \Delta_{i,1} + t\big)
+= \frac{\ell_i^{\text{out}} \big( 2(4 + \Delta_{i,1}) + \ell_i^{\text{out}} - 1 \big)}{2},
+\]
+which yields the $\beta_5$ term in \eqref{eq:req3-latency}.
+
+\emph{(v) Completion work.}
+Exactly one completion occurs, contributing $\beta_6$ and a length-proportional cost
+with $L^{\text{fin}} = (4 + \Delta_{i,1}) + \ell_i^{\text{out}}$, giving
+$\beta_7 \big(4 + \Delta_{i,1} + \ell_i^{\text{out}}\big)$.
+
+\emph{(vi) Ingress/egress and API costs.}
+These contribute $\alpha_0 + \alpha_1 (4 + \Delta_{i,1}) + \alpha_2 \ell_i^{\text{out}}$.
+
+Collecting terms gives \eqref{eq:req3-latency}.
+\end{proof}
 
 \begin{lemma}[Latency of request $(i,4)$]
 \label{lemma:req4-latency}
 Let
 \[
-m_{i,1}\doteq \frac{(1+\Delta_{i,1})b}{C},\quad
-m_{i,2}\doteq \frac{(2+\Delta_{i,1}+\Delta_{i,2})b}{C},\quad
-d_i \doteq m_{i,2}-m_{i,1}=\frac{(1+\Delta_{i,2})b}{C},
+q_4=\left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor,\quad
+r_4=\left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil,\quad
+s_4=\frac{1 + \Delta_{i,2}}{C} - q_4 \in [0,1).
 \]
-and let $o_{i,4}\doteq t^{\text{out}}_{i,4}$ be the decode token count.
-Then the end-to-end latency of $(i,4)$ satisfies
-\begin{align*}
-e_{i,4}
-&\approx \alpha_0 + \alpha_1\, m_{i,2} C + \alpha_2\, o_{i,4} \\
-&\quad + \beta_1 + \beta_3
-      + \beta_0 \big(\lceil d_i\rceil + o_{i,4}\big)
-      + \beta_2\, d_i C
-      + \beta_4\, \frac{m_{i,1}C}{b}
-      + \beta_5\, \frac{d_i C}{b} \\
-&\quad + \beta_6\, \frac{C^2}{b^2}\!\left(
-          \frac{m_{i,2}^2 - m_{i,1}^2}{2}
-        + \frac{\lfloor d_i \rfloor + (d_i-\lfloor d_i \rfloor)^2}{2}
-      \right) \\
-&\quad + (\beta_7 + \beta_8)\, o_{i,4}
-      + \beta_{9} + \beta_{10} + \beta_{11}.
-\end{align*}
+Let $\ell_i^{\text{out}} \le 1 + \Delta_{i,3}$ be the realized output length.
+Then the end-to-end latency of request $(i,4)$ satisfies
+\begin{align}
+e_{i,4} & \approx \alpha_0
+  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
+  + \alpha_2 \ell_i^{\text{out}} \nonumber\\
+& + \beta_0 (r_4 + \ell_i^{\text{out}} - 1)
+  + \beta_1 \big(4 + \Delta_{i,1}\big)
+  + \beta_2 \big(1 + \Delta_{i,2}\big) \nonumber\\
+& + \beta_3 \Big(
+      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
+      + C^2 \big(\tfrac{q_4(q_4+1)}{2} + q_4 s_4 + s_4^2\big)
+    \Big) \nonumber\\
+& + \beta_4 (\ell_i^{\text{out}} - 1)
+  + \beta_5 \cdot \frac{(\ell_i^{\text{out}} - 1)\big(2(5 + \Delta_{i,1} + \Delta_{i,2}) + (\ell_i^{\text{out}} - 1) - 1\big)}{2} \nonumber\\
+& + \beta_6
+  + \beta_7 \big(5 + \Delta_{i,1} + \Delta_{i,2} + \ell_i^{\text{out}}\big).
+\label{eq:req4-latency}
+\end{align}
 \end{lemma}
 
 \begin{proof}
-From \eqref{eq:e2e-param} and \eqref{eq:sc3mem4},
-$e_{i,4}\approx \alpha_0 + \alpha_1 t^{\text{in}}_{i,4} + \alpha_2 o_{i,4}
-+ \sum_{j\in\mathcal{P}_{i,4}} \lambda_j + \sum_{j\in\mathcal{D}_{i,4}} \lambda_j$
-with $t^{\text{in}}_{i,4}=m_{i,2}C$. \textbf{Prefill (segment 2 only):}
-There are $q=\lfloor d_i\rfloor$ full miss-chunks and a partial of size
-$r=d_i-q\in[0,1)$, so $\sum \beta_0=\beta_0\lceil d_i\rceil$,
-$\sum \beta_2\tau_j=\beta_2 d_i C$, and misses sum to
-$\beta_5 \frac{d_i C}{b}$. Reusing the first segment contributes hits
-$\beta_4\frac{m_{i,1}C}{b}$. The quadratic sum over prefill equals
-\[
-\frac{C^2}{b^2}\!\left(m_{i,1}d_i+\frac{d_i^2+q+r^2}{2}\right)
-=
-\frac{C^2}{b^2}\!\left(
-\frac{m_{i,2}^2 - m_{i,1}^2}{2}
-+ \frac{\lfloor d_i \rfloor + (d_i-\lfloor d_i \rfloor)^2}{2}
-\right).
-\]
-\textbf{Decode:} With a single active sequence, decode runs for $o_{i,4}$ steps,
-giving $\sum \beta_0=\beta_0 o_{i,4}$, $\sum \beta_7\delta_j=\beta_7 o_{i,4}$,
-$\sum \beta_8 \tau_j^{\text{dec}}=\beta_8 o_{i,4}$. \textbf{Indicators:}
-Admission/formation contribute $\beta_1+\beta_3$. Prefill completes once
-($\beta_9$), decode completes once ($\beta_{10}$), and finalization contributes
-$\beta_{11}$. Collect terms.
-\end{proof}
+Start from \eqref{eq:e2e-param}. Request $(i,4)$ has a cached prefix of length
+$4+\Delta_{i,1}$ (identical to $(i,1)$), followed by a new segment of length
+$1+\Delta_{i,2}$, and it generates $\ell_i^{\text{out}}$ output tokens.
 
-\fi
+\emph{(i) Prefill structure and iteration count.}
+Only the \emph{new} segment is chunked, so the number of prefill iterations is
+$r_4=\lceil(1+\Delta_{i,2})/C\rceil$, contributing the fixed cost $\beta_0 r_4$.
+Because cached tokens are present from the first prefill iteration, the first-iteration
+hit term contributes $\beta_1(4+\Delta_{i,1})$.
+
+\emph{(ii) Linear per-miss work.}
+Exactly $1+\Delta_{i,2}$ tokens are new, yielding $\beta_2(1+\Delta_{i,2})$.
+
+\emph{(iii) Quadratic prefill work.}
+Split the new segment into $q_4$ full chunks of size $C$ and a final partial of size
+$s_4C$ (when $s_4=0$ there is no partial). For a full chunk $t=1,\ldots,q_4$,
+$\chi^{\text{miss}}=C$ and $\chi^{\text{hit}}=(4+\Delta_{i,1})+(t-1)C$, so
+\[
+\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
+= C(4+\Delta_{i,1}) + C^2 t.
+\]
+Summing full chunks gives $C(4+\Delta_{i,1})q_4 + C^2\frac{q_4(q_4+1)}{2}$.
+If $s_4>0$, the partial contributes $C(4+\Delta_{i,1})s_4 + C^2(q_4 s_4 + s_4^2)$.
+Combining, the quadratic work equals
+\[
+(4+\Delta_{i,1})(1+\Delta_{i,2})
++ C^2\!\left(\tfrac{q_4(q_4+1)}{2} + q_4 s_4 + s_4^2\right),
+\]
+yielding the $\beta_3$ term.
+
+\emph{(iv) Decode iterations.}
+Since the first output token is produced at the end of prefill, decode runs for
+$\ell_i^{\text{out}}-1$ iterations. This contributes $\beta_0(\ell_i^{\text{out}}-1)$
+from fixed cost and $\beta_4(\ell_i^{\text{out}}-1)$ from per-request overhead.
+
+\emph{(v) Decode context-length work.}
+Decode iteration $t=0,\ldots,\ell_i^{\text{out}}-2$ sees context
+$ (5+\Delta_{i,1}+\Delta_{i,2}) + t$, so
+\[
+\sum \ell_{j,i}
+= \sum_{t=0}^{\ell_i^{\text{out}}-2} \big(5+\Delta_{i,1}+\Delta_{i,2}+t\big)
+= \frac{(\ell_i^{\text{out}}-1)\big(2(5+\Delta_{i,1}+\Delta_{i,2}) + (\ell_i^{\text{out}}-1) - 1\big)}{2},
+\]
+giving the $\beta_5$ term.
+
+\emph{(vi) Completion work.}
+Exactly one completion occurs, contributing $\beta_6$ and a length-proportional cost
+with $L^{\text{fin}}=(5+\Delta_{i,1}+\Delta_{i,2})+\ell_i^{\text{out}}$, hence the
+$\beta_7$ term shown.
+
+\emph{(vii) Ingress/egress and API costs.}
+These contribute $\alpha_0 + \alpha_1(5+\Delta_{i,1}+\Delta_{i,2})
++ \alpha_2 \ell_i^{\text{out}}$.
+
+Collecting all terms yields \eqref{eq:req4-latency}.
+\end{proof}
 
 
 \subsection{Refinements using Blackbox Optimization}
