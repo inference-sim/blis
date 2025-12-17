@@ -724,6 +724,202 @@ The strategy is:
 This combination balances practicality (OLS initialization), 
 theory (provable blackbox convergence), and engineering usability.
 
+\section{Scenario 6: Estimating Busy-Loop Cost Parameters Across Prefill Chunk Sizes}
+\label{sec:beta-estimation-chunks}
+
+This section describes an estimation methodology for learning the parameters of a
+vLLM-style busy-loop latency model using only request-level tracing data.
+The formulation explicitly supports experiments run with different prefill chunk sizes
+and learns parameters that generalize across these configurations.
+
+\subsection{Request-Level Trace Signals}
+
+For each request \(i\), we observe the following timestamps from tracing:
+
+\begin{itemize}
+  \item \(t^{(i)}_{\text{queue,in}}\): time when the request enters the wait queue
+  \item \(t^{(i)}_{\text{queue,out}}\): time when the request exits the wait queue
+  \item \(t^{(i)}_{\text{pf,start}}\): time when prefill begins
+  \item \(t^{(i)}_{\text{pf,end}}\): time when prefill completes
+  \item \(t^{(i)}_{\text{dec,start}}\): time when decoding begins
+  \item \(t^{(i)}_{\text{dec,end}}\): time when decoding completes
+\end{itemize}
+
+From these timestamps, we define the observed phase durations:
+\[
+\Delta t^{(i)}_{\text{pf}} = t^{(i)}_{\text{pf,end}} - t^{(i)}_{\text{pf,start}},
+\qquad
+\Delta t^{(i)}_{\text{dec}} = t^{(i)}_{\text{dec,end}} - t^{(i)}_{\text{dec,start}}.
+\]
+
+Requests may remain in the wait queue due to insufficient available GPU capacity,
+which in practice arises because other requests are actively executing prefill or
+decode iterations and occupying busy-loop steps.
+
+\subsection{Busy-Loop Latency Model}
+
+We model inference execution as a sequence of global busy-loop iterations
+(also referred to as ``steps''). The duration of a single iteration \(k\) is assumed to be:
+
+\[
+\Delta t_k
+=
+\beta_0
++
+\beta_1 \cdot T^{\text{pf}}_k
++
+\beta_2 \cdot T^{\text{dec}}_k,
+\]
+
+where:
+\begin{itemize}
+  \item \(\beta_0\) is a fixed per-iteration overhead,
+  \item \(T^{\text{pf}}_k\) is the number of \emph{prefill tokens} processed in iteration \(k\),
+  \item \(T^{\text{dec}}_k\) is the number of \emph{decode tokens} processed in iteration \(k\).
+\end{itemize}
+
+In standard autoregressive decoding, each active decoding request typically produces
+one token per iteration, so \(T^{\text{dec}}_k\) coincides with the number of concurrently
+decoding requests. We retain the token-based notation to emphasize generality.
+
+The parameters \(\beta_0,\beta_1,\beta_2\) depend on the model architecture,
+hardware configuration, and inference engine implementation, and are the quantities
+we aim to estimate.
+
+\subsection{Known Per-Request Quantities}
+
+For each request \(i\), the following quantities are known:
+
+\begin{itemize}
+  \item \(P_i\): number of prefill tokens
+  \item \(D_i\): number of decode tokens (output length)
+  \item \(C_i\): prefill chunk size used for this run
+\end{itemize}
+
+The number of busy-loop iterations executed by request \(i\) in each phase is therefore:
+\[
+n^{(i)}_{\text{pf}} = \left\lceil \frac{P_i}{C_i} \right\rceil,
+\qquad
+n^{(i)}_{\text{dec}} = D_i.
+\]
+
+Note that the final prefill iteration may contain fewer than \(C_i\) tokens. This
+introduces a bounded approximation error that we discuss explicitly below.
+
+\subsection{Prefill and Decode Token Pressure Functions}
+
+From all request traces, we construct two time-varying pressure functions:
+
+\begin{align*}
+T^{\text{pf}}(t) &= \text{total number of prefill tokens being processed at time } t, \\
+T^{\text{dec}}(t) &= \text{total number of decode tokens being processed at time } t.
+\end{align*}
+
+These functions are piecewise constant and are derived as follows:
+
+\begin{itemize}
+  \item During prefill, each active request contributes approximately
+        \(C_i\) tokens per iteration, except possibly in its final iteration.
+  \item During decode, each active request contributes one decode token per iteration.
+\end{itemize}
+
+In practice, we compute these pressures via request concurrency:
+\begin{align*}
+T^{\text{pf}}(t) &\approx \sum_{j:\, t \in [t^{(j)}_{\text{pf,start}},\, t^{(j)}_{\text{pf,end}})} C_j, \\
+T^{\text{dec}}(t) &= \#\{j:\, t \in [t^{(j)}_{\text{dec,start}},\, t^{(j)}_{\text{dec,end}})\}.
+\end{align*}
+
+The approximation arises because the final prefill iteration of a request may process
+fewer than \(C_j\) tokens. Since this affects at most one iteration per request, the
+resulting error is bounded and does not grow with workload size.
+
+\subsection{Token Pressure Exposure}
+
+For each request \(i\), we define its exposure to prefill-token and decode-token pressure
+during each phase:
+
+\begin{align*}
+\Phi^{(i)}_{\text{pf,pf}} &= \int_{t^{(i)}_{\text{pf,start}}}^{t^{(i)}_{\text{pf,end}}}
+T^{\text{pf}}(t)\,dt,
+&
+\Phi^{(i)}_{\text{pf,dec}} &= \int_{t^{(i)}_{\text{pf,start}}}^{t^{(i)}_{\text{pf,end}}}
+T^{\text{dec}}(t)\,dt,
+\\[6pt]
+\Phi^{(i)}_{\text{dec,pf}} &= \int_{t^{(i)}_{\text{dec,start}}}^{t^{(i)}_{\text{dec,end}}}
+T^{\text{pf}}(t)\,dt,
+&
+\Phi^{(i)}_{\text{dec,dec}} &= \int_{t^{(i)}_{\text{dec,start}}}^{t^{(i)}_{\text{dec,end}}}
+T^{\text{dec}}(t)\,dt.
+\end{align*}
+
+These quantities measure the cumulative amount of token-level interference experienced
+by a request due to concurrent prefill and decode activity.
+
+\subsection{Time-Averaged vs.\ Iteration-Averaged Approximation}
+
+The busy-loop model is defined at the iteration level, but iteration-level telemetry is
+not available. We therefore adopt the following approximation:
+
+\begin{quote}
+\emph{Within a request phase, the time-averaged token pressure is approximately equal
+to the iteration-averaged token pressure.}
+\end{quote}
+
+This approximation is accurate when iteration durations do not vary dramatically within
+a phase, which is typically observed in vLLM execution.
+
+\subsection{Linear Regression Formulation}
+
+Using the above definitions, we model the observed phase durations as:
+
+\paragraph{Prefill phase}
+\[
+\Delta t^{(i)}_{\text{pf}}
+\approx
+\beta_0 \, n^{(i)}_{\text{pf}}
++
+\beta_1 \, \Phi^{(i)}_{\text{pf,pf}}
++
+\beta_2 \, \Phi^{(i)}_{\text{pf,dec}}.
+\]
+
+\paragraph{Decode phase}
+\[
+\Delta t^{(i)}_{\text{dec}}
+\approx
+\beta_0 \, n^{(i)}_{\text{dec}}
++
+\beta_1 \, \Phi^{(i)}_{\text{dec,pf}}
++
+\beta_2 \, \Phi^{(i)}_{\text{dec,dec}}.
+\]
+
+Stacking all requests and phases yields a linear system:
+\[
+\mathbf{y} \approx \mathbf{X}
+\begin{bmatrix}
+\beta_0 \\ \beta_1 \\ \beta_2
+\end{bmatrix},
+\]
+which can be solved using nonnegative least squares, ridge regression, or robust
+(Huber or quantile) regression. The optimization problem is convex.
+
+\subsection{Discussion}
+
+This formulation has several desirable properties:
+
+\begin{itemize}
+  \item It generalizes naturally across different prefill chunk sizes.
+  \item It estimates costs per \emph{token}, not per request.
+  \item It captures cross-interference between prefill and decode phases.
+  \item It avoids simulation-in-the-loop parameter fitting.
+\end{itemize}
+
+Once estimated, the parameters \(\beta_0,\beta_1,\beta_2\) can be used in a forward
+discrete-event simulator to predict latency and throughput under alternative workloads
+and scheduling policies.
+
+
 
 We may also want to read, use and cite ... https://arxiv.org/pdf/2302.02536 and variants
 like https://www.jhuapl.edu/spsa/pdf-spsa/bhatnagar\_kowshick\_simulation05.pdf.
