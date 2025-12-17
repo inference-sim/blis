@@ -334,7 +334,6 @@ $(i,4)$ & $[= (i,1)], [1 + \Delta_{i,2}]$
 \end{tabular}
 \end{table}
 
-
 \paragraph*{Sampling.}
 Requests in a quad have a maximum length budget of $M$ that must be divided across input segments and output, 
 with variability. We therefore sample the $\Delta$s using a Dirichlet–Multinomial: 
@@ -354,13 +353,22 @@ for Segment~2 or output). The sampler is given in Algorithm~\ref{algo:sc3sampler
   \end{algorithmic}
 \end{algorithm}
 
-
-\begin{lemma}[Latency of request $(i,1)$]
-\label{lemma:req1-latency}
-Let $q_1 = \left\lfloor \frac{4 + \Delta_{i,1}}{C} \right\rfloor$, 
-$r_1 = \left\lceil \frac{4 + \Delta_{i,1}}{C} \right\rceil$, and 
-$s_1 = \frac{4 + \Delta_{i,1}}{C} - q_1 \in [0,1)$.
-Then, the end-to-end latency of request $(i,1)$ satisfies
+\begin{theorem}
+\label{theo:scenario3}
+Define the following quantities.
+\begin{align*}
+& q_1 = \left\lfloor \frac{4 + \Delta_{i,1}}{C} \right\rfloor  
+& r_1 = \left\lceil \frac{4 + \Delta_{i,1}}{C} \right\rceil 
+& s_1 = \frac{4 + \Delta_{i,1}}{C} - q_1 & & s_1 \in [0,1) \nonumber \\
+& q_2 = \left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor
+& r_2 = \left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil
+& s_2 = \frac{1 + \Delta_{i,2}}{C} - q_2 & & s_2 \in [0,1) \nonumber \\
+& q_4 = \left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor
+& r_4 = \left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil
+& s_4 = \frac{1 + \Delta_{i,2}}{C} - q_4 & & s_4 \in [0,1)
+\end{align*}
+Recall that $\ell_i^{\text{out}}$ is the realized output length. 
+The end-to-end latencies in Scenario 3 can be expressed as follows.
 \begin{align}
 e_{i,1} & \approx \alpha_0
   + \alpha_1 (4 + \Delta_{i,1})
@@ -369,11 +377,50 @@ e_{i,1} & \approx \alpha_0
   + \beta_2 (4 + \Delta_{i,1})
   + \beta_3 C^2 \left(\frac{q_1 (q_1 + 1)}{2} + q_1 s_1 + s_1^2\right)
   + \beta_6
-  + \beta_7 (5 + \Delta_{i,1}) \label{eq:req1-latency}
+  + \beta_7 (5 + \Delta_{i,1}) \label{eq:req1-latency} \\
+e_{i,2} & \approx \alpha_0
+  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
+  + \alpha_2 \nonumber\\
+& + \beta_0 r_2
+  + \beta_1 (4 + \Delta_{i,1})
+  + \beta_2 (1 + \Delta_{i,2}) \nonumber\\
+& + \beta_3 \Big(
+      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
+      + C^2 \big(\tfrac{q_2(q_2+1)}{2} + q_2 s_2 + s_2^2\big)
+    \Big)
+  + \beta_6
+  + \beta_7 \big(6 + \Delta_{i,1} + \Delta_{i,2}\big)
+\label{eq:req2-latency} \\
+e_{i,3} & \approx \alpha_0
+  + \alpha_1 \big(4 + \Delta_{i,1}\big)
+  + \alpha_2 \ell_i^{\text{out}} \nonumber \\
+& + \beta_0 \ell_i^{\text{out}}
+  + \beta_1 \big(4 + \Delta_{i,1}\big) \nonumber \\
+&  + \beta_4 \ell_i^{\text{out}}
+  + \beta_5 \cdot \frac{\ell_i^{\text{out}} \big( 2(4 + \Delta_{i,1}) + \ell_i^{\text{out}} - 1 \big)}{2}
+  + \beta_6
+  + \beta_7 \big(4 + \Delta_{i,1} + \ell_i^{\text{out}}\big)
+\label{eq:req3-latency} \\
+e_{i,4} & \approx \alpha_0
+  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
+  + \alpha_2 \ell_i^{\text{out}} \nonumber\\
+& + \beta_0 (r_4 + \ell_i^{\text{out}} - 1)
+  + \beta_1 \big(4 + \Delta_{i,1}\big)
+  + \beta_2 \big(1 + \Delta_{i,2}\big) \nonumber\\
+& + \beta_3 \Big(
+      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
+      + C^2 \big(\tfrac{q_4(q_4+1)}{2} + q_4 s_4 + s_4^2\big)
+    \Big) \nonumber\\
+& + \beta_4 (\ell_i^{\text{out}} - 1)
+  + \beta_5 \cdot \frac{(\ell_i^{\text{out}} - 1)\big(2(5 + \Delta_{i,1} + \Delta_{i,2}) + (\ell_i^{\text{out}} - 1) - 1\big)}{2} \nonumber\\
+& + \beta_6
+  + \beta_7 \big(5 + \Delta_{i,1} + \Delta_{i,2} + \ell_i^{\text{out}}\big)
+\label{eq:req4-latency}
 \end{align}
-\end{lemma}
 
-\begin{proof}
+\end{theorem}
+
+\begin{proof}[\textbf{Proof of \eqref{eq:req1-latency}}.]
 Start from the end-to-end model \eqref{eq:e2e-param}, where the busy-loop
 contribution is $\sum_j \lambda_j$ over the iterations in which $(i,1)$ is active.
 
@@ -421,33 +468,7 @@ output is $1$).
 Collecting all nonzero contributions gives \eqref{eq:req1-latency}.
 \end{proof}
 
-\begin{lemma}[Latency of request $(i,2)$]
-\label{lemma:req2-latency}
-Define
-\[
-q_2=\left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor,\quad
-r_2=\left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil,\quad
-s_2=\frac{1 + \Delta_{i,2}}{C} - q_2 \in [0,1).
-\]
-Then the end-to-end latency of request $(i,2)$ satisfies
-\begin{align}
-e_{i,2} & \approx \alpha_0
-  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
-  + \alpha_2 \nonumber\\
-& + \beta_0 r_2
-  + \beta_1 (4 + \Delta_{i,1})
-  + \beta_2 (1 + \Delta_{i,2}) \nonumber\\
-& + \beta_3 \Big(
-      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
-      + C^2 \big(\tfrac{q_2(q_2+1)}{2} + q_2 s_2 + s_2^2\big)
-    \Big)
-  + \beta_6
-  + \beta_7 \big(6 + \Delta_{i,1} + \Delta_{i,2}\big)
-\label{eq:req2-latency}
-\end{align}
-\end{lemma}
-
-\begin{proof}
+\begin{proof}[\textbf{Proof of \eqref{eq:req2-latency}}.]
 Start from \eqref{eq:e2e-param}. Since requests are issued sequentially, 
 $(i,2)$ experiences no queueing from other requests; its busy-loop contribution 
 is the sum of $\lambda_j$ over iterations in which $(i,2)$ is in prefill.
@@ -500,25 +521,7 @@ These contribute $\alpha_0 + \alpha_1 (5 + \Delta_{i,1} + \Delta_{i,2}) + \alpha
 Collecting all contributions gives \eqref{eq:req2-latency}.
 \end{proof}
 
-\begin{lemma}[Latency of request $(i,3)$]
-\label{lemma:req3-latency}
-Recall that $\ell_i^{\text{out}} \leq 1 + \Delta_{i,3}$ is the realized output length.
-Then the end-to-end latency of request $(i,3)$ satisfies
-\begin{align}
-e_{i,3} & \approx \alpha_0
-  + \alpha_1 \big(4 + \Delta_{i,1}\big)
-  + \alpha_2 \ell_i^{\text{out}} \nonumber \\
-& + \beta_0 \ell_i^{\text{out}}
-  + \beta_1 \big(4 + \Delta_{i,1}\big) \nonumber \\
-&  + \beta_4 \ell_i^{\text{out}}
-  + \beta_5 \cdot \frac{\ell_i^{\text{out}} \big( 2(4 + \Delta_{i,1}) + \ell_i^{\text{out}} - 1 \big)}{2}
-  + \beta_6
-  + \beta_7 \big(4 + \Delta_{i,1} + \ell_i^{\text{out}}\big)
-\label{eq:req3-latency}
-\end{align}
-\end{lemma}
-
-\begin{proof}
+\begin{proof}[\textbf{Proof of \eqref{eq:req3-latency}}.]
 Start from \eqref{eq:e2e-param}. The input of $(i,3)$ equals $(i,1)$, so the entire
 prefix of length $4 + \Delta_{i,1}$ is cached.
 
@@ -557,36 +560,7 @@ These contribute $\alpha_0 + \alpha_1 (4 + \Delta_{i,1}) + \alpha_2 \ell_i^{\tex
 Collecting terms gives \eqref{eq:req3-latency}.
 \end{proof}
 
-\begin{lemma}[Latency of request $(i,4)$]
-\label{lemma:req4-latency}
-Let
-\[
-q_4=\left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor,\quad
-r_4=\left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil,\quad
-s_4=\frac{1 + \Delta_{i,2}}{C} - q_4 \in [0,1).
-\]
-Let $\ell_i^{\text{out}} \le 1 + \Delta_{i,3}$ be the realized output length.
-Then the end-to-end latency of request $(i,4)$ satisfies
-\begin{align}
-e_{i,4} & \approx \alpha_0
-  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
-  + \alpha_2 \ell_i^{\text{out}} \nonumber\\
-& + \beta_0 (r_4 + \ell_i^{\text{out}} - 1)
-  + \beta_1 \big(4 + \Delta_{i,1}\big)
-  + \beta_2 \big(1 + \Delta_{i,2}\big) \nonumber\\
-& + \beta_3 \Big(
-      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
-      + C^2 \big(\tfrac{q_4(q_4+1)}{2} + q_4 s_4 + s_4^2\big)
-    \Big) \nonumber\\
-& + \beta_4 (\ell_i^{\text{out}} - 1)
-  + \beta_5 \cdot \frac{(\ell_i^{\text{out}} - 1)\big(2(5 + \Delta_{i,1} + \Delta_{i,2}) + (\ell_i^{\text{out}} - 1) - 1\big)}{2} \nonumber\\
-& + \beta_6
-  + \beta_7 \big(5 + \Delta_{i,1} + \Delta_{i,2} + \ell_i^{\text{out}}\big).
-\label{eq:req4-latency}
-\end{align}
-\end{lemma}
-
-\begin{proof}
+\begin{proof}[\textbf{Proof of \eqref{eq:req4-latency}}.]
 Start from \eqref{eq:e2e-param}. Request $(i,4)$ has a cached prefix of length
 $4+\Delta_{i,1}$ (identical to $(i,1)$), followed by a new segment of length
 $1+\Delta_{i,2}$, and it generates $\ell_i^{\text{out}}$ output tokens.
@@ -647,6 +621,112 @@ Collecting all terms yields \eqref{eq:req4-latency}.
 
 \subsection{Refinements using Blackbox Optimization}
 \label{subsec:refinements-blackbox-optimization}
+
+\subsubsection{Scenario 4: Stress Workloads for Identifiability}
+\label{subsubsec:scenario4}
+
+\paragraph*{Why Scenario~4?}
+In Scenario~3 we issued requests strictly one after another. 
+This was useful for controlled analysis, but it makes some coefficients in 
+(\ref{eq:busy-loop-expanded}) hard to tell apart. 
+For example, the fixed per-iteration cost $\beta_0$ and the 
+per-finish cost $\beta_6$ always appear together, so 
+their effects ``bunch up.'' 
+Scenario~4 is designed to break such correlations by mixing 
+different kinds of requests \emph{concurrently}.
+
+\paragraph*{Key idea.}
+We want situations where:
+\begin{enumerate}
+  \item Busy loop iterations run for a long time \emph{without any finishes}
+        (so we can clearly see $\beta_0$, $\beta_4$, $\beta_5$).
+  \item Bursts of finishes happen with very little else going on
+        (so we can clearly see $\beta_6$, $\beta_7$).
+  \item Large uncached segments appear with different chunk sizes
+        (so we can measure quadratic prefill effects $\beta_2$, $\beta_3$).
+\end{enumerate}
+
+\paragraph*{How to craft the workload.}
+We design ``episodes'' that deliberately excite different parts of the latency model:
+\begin{itemize}
+  \item \textbf{Episode A (Decode plateaus):} Launch several long-output decode requests with cached prefixes. 
+  This produces many iterations with large decode load but no completions --- a clean signal for $\beta_0$, $\beta_4$, and $\beta_5$.
+  \item \textbf{Episode B (Finish spikes):} Launch many short-output requests close together. 
+  Their completions cluster, producing spikes that isolate $\beta_6$ and $\beta_7$.
+  \item \textbf{Episode C (Quadratic prefills):} Launch requests with long uncached segments under varying chunk sizes. 
+  This creates strong quadratic work that identifies $\beta_2$ and $\beta_3$.
+  \item \textbf{Episode D (Controls):} Run one request at a time. 
+  These anchor the fixed overhead terms $\alpha_0$ and $\beta_0$.
+\end{itemize}
+
+By mixing these episodes and varying chunk sizes $C$, block sizes $b$, and output lengths,
+we obtain diverse situations where the different cost terms can be estimated separately.
+
+\vspace{0.75em}
+\noindent\textbf{Takeaway.}  
+Unlike Scenario~3, requests in Scenario~4 should \emph{not} be strictly sequential.  
+They should overlap and stress the system in different ways to tease apart 
+the contributions of each coefficient.
+
+\subsection{Blackbox Optimization after Regression}
+\label{subsec:blackbox-after-ols}
+
+\paragraph*{Step 1: Linear regression as a baseline.}
+We first fit coefficients $(\alpha, \beta)$ using regression, 
+because (\ref{eq:e2e-param}) and (\ref{eq:busy-loop-expanded}) are linear in the coefficients. 
+This gives us good initial values quickly.
+
+\paragraph*{Step 2: Refine with blackbox optimization.}
+In reality, our predictor never matches the true system exactly:
+queueing noise, kernel implementations, and clock jitter 
+all introduce extra effects. 
+So we refine coefficients by treating the simulator + hardware as a 
+\emph{blackbox function}: input = coefficients, output = prediction error. 
+
+We want provably good algorithms that work even when we only observe noisy end-to-end latencies.
+
+\paragraph*{Provably convergent choice: SPSA.}
+A simple but powerful option is \emph{Simultaneous Perturbation Stochastic Approximation (SPSA)}:
+\begin{itemize}
+  \item At each step, we perturb all coefficients in random directions (e.g., $\pm 1$ signs).
+  \item We measure the loss (prediction error) at two points: ``plus perturbation'' and ``minus perturbation.''
+  \item From these two measurements we estimate a gradient and update all coefficients at once.
+\end{itemize}
+SPSA needs only two measurements per step \emph{regardless of how many coefficients we have}, 
+and it comes with convergence guarantees under standard step-size rules. 
+This makes it practical and theoretically sound.
+
+\paragraph*{Other practical options.}
+In addition to SPSA:
+\begin{itemize}
+  \item \textbf{Zeroth-order SGD:} Similar to SPSA but uses Gaussian perturbations; often smoother.
+  \item \textbf{BOBYQA/Cobyla:} Derivative-free optimizers that work well with box constraints.
+  \item \textbf{Bayesian optimization:} Useful if we reparameterize to a low dimension.
+  \item \textbf{CMA-ES / NES:} Robust global search strategies when the loss landscape has many local minima.
+\end{itemize}
+
+\paragraph*{Practical details.}
+\begin{itemize}
+  \item Use regression estimates as the starting point.
+  \item Impose box constraints (e.g., $\beta_2,\beta_3,\beta_5,\beta_6,\beta_7 \ge 0$).
+  \item Average losses over repeated runs of Scenario~4 episodes to reduce noise.
+  \item Early stop when validation episodes stop improving.
+\end{itemize}
+
+\paragraph*{Summary.}
+The strategy is:
+\begin{enumerate}
+  \item Design workloads (Scenario~4) that disentangle the cost terms.
+  \item Run linear regression for a fast baseline estimate.
+  \item Apply blackbox optimization (e.g., SPSA) for refinement, 
+  which provably converges using only end-to-end latency observations.
+\end{enumerate}
+This combination balances practicality (OLS initialization), 
+theory (provable blackbox convergence), and engineering usability.
+
+
+We may also want to read, use and cite ... https://arxiv.org/pdf/2302.02536 and variants
+like https://www.jhuapl.edu/spsa/pdf-spsa/bhatnagar\_kowshick\_simulation05.pdf.
 
 \section{Evaluation}
 \label{sec:evaluation}
