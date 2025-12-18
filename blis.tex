@@ -724,200 +724,415 @@ The strategy is:
 This combination balances practicality (OLS initialization), 
 theory (provable blackbox convergence), and engineering usability.
 
-\section{Scenario 6: Estimating Busy-Loop Cost Parameters Across Prefill Chunk Sizes}
-\label{sec:beta-estimation-chunks}
+\section{Trace-Only Estimation of Step-Level Execution Coefficients}
+\label{sec:step_beta_estimation}
 
-This section describes an estimation methodology for learning the parameters of a
-vLLM-style busy-loop latency model using only request-level tracing data.
-The formulation explicitly supports experiments run with different prefill chunk sizes
-and learns parameters that generalize across these configurations.
+\subsection{Problem Setup and Goal}
 
-\subsection{Request-Level Trace Signals}
-
-For each request \(i\), we observe the following timestamps from tracing:
-
-\begin{itemize}
-  \item \(t^{(i)}_{\text{queue,in}}\): time when the request enters the wait queue
-  \item \(t^{(i)}_{\text{queue,out}}\): time when the request exits the wait queue
-  \item \(t^{(i)}_{\text{pf,start}}\): time when prefill begins
-  \item \(t^{(i)}_{\text{pf,end}}\): time when prefill completes
-  \item \(t^{(i)}_{\text{dec,start}}\): time when decoding begins
-  \item \(t^{(i)}_{\text{dec,end}}\): time when decoding completes
-\end{itemize}
-
-From these timestamps, we define the observed phase durations:
-\[
-\Delta t^{(i)}_{\text{pf}} = t^{(i)}_{\text{pf,end}} - t^{(i)}_{\text{pf,start}},
-\qquad
-\Delta t^{(i)}_{\text{dec}} = t^{(i)}_{\text{dec,end}} - t^{(i)}_{\text{dec,start}}.
-\]
-
-Requests may remain in the wait queue due to insufficient available GPU capacity,
-which in practice arises because other requests are actively executing prefill or
-decode iterations and occupying busy-loop steps.
-
-\subsection{Busy-Loop Latency Model}
-
-We model inference execution as a sequence of global busy-loop iterations
-(also referred to as ``steps''). The duration of a single iteration \(k\) is assumed to be:
-
-\[
+We seek to estimate \emph{step-level} execution coefficients for a vLLM-style inference engine.
+We model each busy-loop iteration (``step'') $k$ as having duration
+\begin{equation}
 \Delta t_k
-=
+\;=\;
 \beta_0
-+
-\beta_1 \cdot T^{\text{pf}}_k
-+
-\beta_2 \cdot T^{\text{dec}}_k,
-\]
-
+\;+\;
+\beta_1\,T^{\mathrm{pf}}_k
+\;+\;
+\beta_2\,T^{\mathrm{dec}}_k,
+\label{eq:step_model}
+\end{equation}
 where:
 \begin{itemize}
-  \item \(\beta_0\) is a fixed per-iteration overhead,
-  \item \(T^{\text{pf}}_k\) is the number of \emph{prefill tokens} processed in iteration \(k\),
-  \item \(T^{\text{dec}}_k\) is the number of \emph{decode tokens} processed in iteration \(k\).
+  \item $\Delta t_k$ is the wall-clock duration of step $k$ (seconds),
+  \item $T^{\mathrm{pf}}_k$ is the number of \emph{prefill tokens} processed in step $k$,
+  \item $T^{\mathrm{dec}}_k$ is the number of \emph{decode tokens} processed in step $k$,
+  \item $\beta_0$ has units of seconds/step (fixed per-step overhead),
+  \item $\beta_1,\beta_2$ have units of seconds/token.
 \end{itemize}
 
-In standard autoregressive decoding, each active decoding request typically produces
-one token per iteration, so \(T^{\text{dec}}_k\) coincides with the number of concurrently
-decoding requests. We retain the token-based notation to emphasize generality.
+These coefficients are the parameters required by a discrete-event simulator whose atomic
+advance corresponds to one busy-loop iteration.
 
-The parameters \(\beta_0,\beta_1,\beta_2\) depend on the model architecture,
-hardware configuration, and inference engine implementation, and are the quantities
-we aim to estimate.
+\paragraph{Challenge.}
+Production traces do \emph{not} expose step boundaries or per-step token counts.
+Instead, they provide only request-level phase boundaries (prefill start/end, decode start/end)
+and total token counts.
+Our goal is therefore to infer the step-level coefficients $\beta$ using
+\emph{trace data alone}, without modifying or instrumenting the inference engine.
 
-\subsection{Known Per-Request Quantities}
+---
 
-For each request \(i\), the following quantities are known:
+\subsection{From Discrete Steps to a Continuous-Time Surrogate}
 
+Let phase instance $i$ denote either:
 \begin{itemize}
-  \item \(P_i\): number of prefill tokens
-  \item \(D_i\): number of decode tokens (output length)
-  \item \(C_i\): prefill chunk size used for this run
+  \item the prefill phase of a request, or
+  \item the decode phase of a request.
 \end{itemize}
 
-The number of busy-loop iterations executed by request \(i\) in each phase is therefore:
-\[
-n^{(i)}_{\text{pf}} = \left\lceil \frac{P_i}{C_i} \right\rceil,
+From trace data, phase $i$ provides:
+\begin{itemize}
+  \item start and end times $(t_{i,s}, t_{i,e})$,
+  \item duration $T_i = t_{i,e}-t_{i,s}$ (seconds),
+  \item a known number of busy-loop iterations $N_i$ executed during the phase,
+  \item time-varying \emph{token pressures}:
+  \begin{itemize}
+    \item $p^{\mathrm{pf}}(t)$ = total prefill tokens scheduled per step at wall-clock time $t$,
+    \item $p^{\mathrm{dec}}(t)$ = total decode tokens scheduled per step at wall-clock time $t$,
+  \end{itemize}
+  computed from overlapping requests in the trace.
+\end{itemize}
+
+We define a continuous-time analogue of the step duration:
+\begin{equation}
+\Delta(t;\beta)
+\;=\;
+\beta_0
+\;+\;
+\beta_1\,p^{\mathrm{pf}}(t)
+\;+\;
+\beta_2\,p^{\mathrm{dec}}(t),
 \qquad
-n^{(i)}_{\text{dec}} = D_i.
-\]
+\Delta(t;\beta) > 0.
+\label{eq:delta_t}
+\end{equation}
 
-Note that the final prefill iteration may contain fewer than \(C_i\) tokens. This
-introduces a bounded approximation error that we discuss explicitly below.
+\paragraph{Interpretation.}
+If pressures were constant, each busy-loop iteration would take $\Delta(t;\beta)$ seconds.
+When pressures vary, the total number of iterations executed over a wall-clock interval
+is approximated by integrating the instantaneous step rate.
 
-\subsection{Prefill and Decode Token Pressure Functions}
+---
 
-From all request traces, we construct two time-varying pressure functions:
+\subsection{Predicted Step Count (Convex Surrogate)}
 
-\begin{align*}
-T^{\text{pf}}(t) &= \text{total number of prefill tokens being processed at time } t, \\
-T^{\text{dec}}(t) &= \text{total number of decode tokens being processed at time } t.
-\end{align*}
+We define the \emph{predicted} number of steps during phase $i$ as
+\begin{equation}
+\widehat N_i(\beta)
+\;=\;
+\int_{t_{i,s}}^{t_{i,e}}
+\frac{1}{\Delta(t;\beta)}\,dt.
+\label{eq:Nhat_continuous}
+\end{equation}
 
-These functions are piecewise constant and are derived as follows:
+\paragraph{Key property.}
+Since $\Delta(t;\beta)$ is affine in $\beta$ and strictly positive,
+the integrand $1/\Delta(t;\beta)$ is convex in $\beta$.
+Therefore, $\widehat N_i(\beta)$ is a convex function of $\beta$.
 
-\begin{itemize}
-  \item During prefill, each active request contributes approximately
-        \(C_i\) tokens per iteration, except possibly in its final iteration.
-  \item During decode, each active request contributes one decode token per iteration.
-\end{itemize}
+\paragraph{Discrete approximation.}
+We approximate the integral using $m$ sample points
+$t_{i,1},\ldots,t_{i,m}\in[t_{i,s},t_{i,e}]$ with weights $w_{i,j}$
+satisfying $\sum_j w_{i,j}=T_i$:
+\begin{equation}
+\widehat N_i(\beta)
+\;\approx\;
+\sum_{j=1}^{m}
+\frac{w_{i,j}}
+{\beta_0 + \beta_1\,p^{\mathrm{pf}}(t_{i,j}) + \beta_2\,p^{\mathrm{dec}}(t_{i,j})}.
+\label{eq:Nhat_discrete}
+\end{equation}
+In practice, we use stratified sampling (one sample per equal-width subinterval),
+which yields an unbiased, low-variance estimator.
 
-In practice, we compute these pressures via request concurrency:
-\begin{align*}
-T^{\text{pf}}(t) &\approx \sum_{j:\, t \in [t^{(j)}_{\text{pf,start}},\, t^{(j)}_{\text{pf,end}})} C_j, \\
-T^{\text{dec}}(t) &= \#\{j:\, t \in [t^{(j)}_{\text{dec,start}},\, t^{(j)}_{\text{dec,end}})\}.
-\end{align*}
+---
 
-The approximation arises because the final prefill iteration of a request may process
-fewer than \(C_j\) tokens. Since this affects at most one iteration per request, the
-resulting error is bounded and does not grow with workload size.
+\subsection{Matching Observed and Predicted Step Counts}
 
-\subsection{Token Pressure Exposure}
+Ideally, we would enforce
+\begin{equation}
+\widehat N_i(\beta) = N_i,
+\end{equation}
+but this equality constraint is nonconvex.
+Instead, we use an efficient \emph{convex--concave procedure (CCP)}
+that enforces a two-sided match via successive convex approximations.
 
-For each request \(i\), we define its exposure to prefill-token and decode-token pressure
-during each phase:
+---
 
-\begin{align*}
-\Phi^{(i)}_{\text{pf,pf}} &= \int_{t^{(i)}_{\text{pf,start}}}^{t^{(i)}_{\text{pf,end}}}
-T^{\text{pf}}(t)\,dt,
-&
-\Phi^{(i)}_{\text{pf,dec}} &= \int_{t^{(i)}_{\text{pf,start}}}^{t^{(i)}_{\text{pf,end}}}
-T^{\text{dec}}(t)\,dt,
-\\[6pt]
-\Phi^{(i)}_{\text{dec,pf}} &= \int_{t^{(i)}_{\text{dec,start}}}^{t^{(i)}_{\text{dec,end}}}
-T^{\text{pf}}(t)\,dt,
-&
-\Phi^{(i)}_{\text{dec,dec}} &= \int_{t^{(i)}_{\text{dec,start}}}^{t^{(i)}_{\text{dec,end}}}
-T^{\text{dec}}(t)\,dt.
-\end{align*}
+\subsection{Convex--Concave Procedure}
 
-These quantities measure the cumulative amount of token-level interference experienced
-by a request due to concurrent prefill and decode activity.
+At iteration $r$, with current estimate $\beta^{(r)}$, we impose:
 
-\subsection{Time-Averaged vs.\ Iteration-Averaged Approximation}
+\paragraph{(A) Upper bound (convex, exact).}
+\begin{equation}
+\widehat N_i(\beta) \;\le\; N_i^{\mathrm{eff}} + u_i,
+\qquad u_i \ge 0,
+\label{eq:upper_constraint}
+\end{equation}
+which is convex because $\widehat N_i(\beta)$ is convex.
 
-The busy-loop model is defined at the iteration level, but iteration-level telemetry is
-not available. We therefore adopt the following approximation:
-
-\begin{quote}
-\emph{Within a request phase, the time-averaged token pressure is approximately equal
-to the iteration-averaged token pressure.}
-\end{quote}
-
-This approximation is accurate when iteration durations do not vary dramatically within
-a phase, which is typically observed in vLLM execution.
-
-\subsection{Linear Regression Formulation}
-
-Using the above definitions, we model the observed phase durations as:
-
-\paragraph{Prefill phase}
+\paragraph{(B) Lower bound (linearized, convex).}
+For a convex function $f$, the first-order Taylor expansion
+is a global under-estimator:
 \[
-\Delta t^{(i)}_{\text{pf}}
-\approx
-\beta_0 \, n^{(i)}_{\text{pf}}
-+
-\beta_1 \, \Phi^{(i)}_{\text{pf,pf}}
-+
-\beta_2 \, \Phi^{(i)}_{\text{pf,dec}}.
+f(\beta) \ge f(\beta^{(r)}) + \nabla f(\beta^{(r)})^\top(\beta-\beta^{(r)}).
 \]
+Applying this to $f=\widehat N_i$ gives the convex constraint
+\begin{equation}
+\widehat N_i(\beta^{(r)})
+\;+\;
+\nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)})
+\;\ge\;
+N_i^{\mathrm{eff}} - s_i,
+\qquad s_i \ge 0.
+\label{eq:lower_constraint}
+\end{equation}
 
-\paragraph{Decode phase}
-\[
-\Delta t^{(i)}_{\text{dec}}
-\approx
-\beta_0 \, n^{(i)}_{\text{dec}}
-+
-\beta_1 \, \Phi^{(i)}_{\text{dec,pf}}
-+
-\beta_2 \, \Phi^{(i)}_{\text{dec,dec}}.
-\]
-
-Stacking all requests and phases yields a linear system:
-\[
-\mathbf{y} \approx \mathbf{X}
+\paragraph{Gradient.}
+From~\eqref{eq:Nhat_discrete},
+\begin{equation}
+\nabla \widehat N_i(\beta)
+=
+-\sum_{j=1}^{m}
+w_{i,j}\,
+\frac{x_{i,j}}{(\beta^\top x_{i,j})^2},
+\qquad
+x_{i,j} =
 \begin{bmatrix}
-\beta_0 \\ \beta_1 \\ \beta_2
-\end{bmatrix},
-\]
-which can be solved using nonnegative least squares, ridge regression, or robust
-(Huber or quantile) regression. The optimization problem is convex.
+1 \\ p^{\mathrm{pf}}(t_{i,j}) \\ p^{\mathrm{dec}}(t_{i,j})
+\end{bmatrix}.
+\end{equation}
 
-\subsection{Discussion}
+---
 
-This formulation has several desirable properties:
+\subsection{Handling the Final Partial Prefill Chunk}
 
+For prefill phases, the final iteration may process fewer than the maximum chunk size $C$ tokens.
+To account for this without introducing additional latent variables, we use an
+\emph{effective iteration count}.
+
+Let:
 \begin{itemize}
-  \item It generalizes naturally across different prefill chunk sizes.
-  \item It estimates costs per \emph{token}, not per request.
-  \item It captures cross-interference between prefill and decode phases.
-  \item It avoids simulation-in-the-loop parameter fitting.
+  \item $P_i$ be the prompt length (tokens),
+  \item $C$ be the prefill chunk size,
+  \item $N_i$ be the observed number of prefill iterations.
 \end{itemize}
 
-Once estimated, the parameters \(\beta_0,\beta_1,\beta_2\) can be used in a forward
-discrete-event simulator to predict latency and throughput under alternative workloads
-and scheduling policies.
+Define the remainder:
+\[
+r_i = P_i - C\,(N_i-1), \qquad r_i \in (0,C].
+\]
+
+We then define:
+\begin{equation}
+N_i^{\mathrm{eff}}
+\;=\;
+(N_i-1) + \frac{r_i}{C}.
+\label{eq:Neff}
+\end{equation}
+
+For decode phases, where each iteration produces exactly one token, we set
+$N_i^{\mathrm{eff}} = N_i$.
+
+This correction preserves convexity and captures the dominant effect of partial final chunks.
+
+---
+
+\subsection{Convex Optimization Problem (Per Iteration)}
+
+At iteration $r$, we solve the following convex quadratic program:
+\begin{align}
+\min_{\beta,\{u_i,s_i\}} \quad
+& \sum_i \left(u_i^2 + s_i^2\right)
+\;+\;
+\lambda \|\beta - \beta^{\mathrm{warm}}\|_2^2
+\\
+\text{s.t.}\quad
+& \widehat N_i(\beta) \le N_i^{\mathrm{eff}} + u_i
+\quad \forall i,
+\\
+& \widehat N_i(\beta^{(r)})
++ \nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)})
+\ge N_i^{\mathrm{eff}} - s_i
+\quad \forall i,
+\\
+& \beta \ge 0,
+\qquad
+\beta^\top x_{i,j} \ge \varepsilon \quad \forall i,j,
+\end{align}
+where:
+\begin{itemize}
+  \item $\beta^{\mathrm{warm}}$ is a warm-start estimate (e.g., from time-averaged regression),
+  \item $\lambda$ is a regularization parameter,
+  \item $\varepsilon>0$ enforces positivity of step durations.
+\end{itemize}
+
+Each iteration is convex and efficient; convergence is typically achieved in a small number of iterations.
+
+---
+
+\subsection{Summary}
+
+This procedure:
+\begin{itemize}
+  \item estimates \emph{step-level} coefficients $\beta$,
+  \item uses \emph{trace data alone} (no engine instrumentation),
+  \item faithfully approximates recursive step execution via a convex surrogate,
+  \item accounts for partial prefill chunks,
+  \item and produces coefficients directly usable in a discrete-event simulator.
+\end{itemize}
+
+Crucially, all nonconvexity is handled through linearization, 
+yielding a sequence of fast, well-conditioned convex problems with clear physical interpretation.
+
+\subsection{Correctness, Identifiability, and Convergence}
+\label{sec:correctness_convergence}
+
+We briefly discuss why the proposed procedure is well-founded, what it guarantees,
+and what it does \emph{not} claim.
+
+\paragraph{Correctness of the surrogate model.}
+The discrete busy-loop execution of the inference engine is governed by the step-level
+relation~\eqref{eq:step_model}. Since step boundaries are unobserved in trace data, we replace
+explicit step simulation by the continuous-time surrogate~\eqref{eq:Nhat_continuous}, which
+counts steps by integrating the instantaneous step rate $1/\Delta(t;\beta)$.
+
+This replacement is standard in discrete-event modeling: the recursion
+``advance by $\Delta(t)$ and repeat'' is a Riemann approximation of the integral
+$\int dt / \Delta(t)$. When pressures vary slowly relative to step durations,
+or when many steps occur within a phase, the approximation error is negligible.
+Importantly, this surrogate preserves the \emph{units} and \emph{semantics} of step-level
+execution: $\widehat N_i(\beta)$ predicts the number of busy-loop iterations, not elapsed time.
+
+\paragraph{Identifiability from trace data.}
+Trace data alone does not uniquely identify the per-step token counts
+$\{T^{\mathrm{pf}}_k, T^{\mathrm{dec}}_k\}$.
+However, the step-level coefficients $\beta$ \emph{are} identifiable under mild conditions:
+the phase instances must exhibit sufficient diversity in the pressure profiles
+$(p^{\mathrm{pf}}(t), p^{\mathrm{dec}}(t))$.
+Intuitively, phases dominated by prefill constrain $\beta_1$, decode-heavy phases constrain
+$\beta_2$, and low-pressure phases constrain $\beta_0$.
+The regularization term $\|\beta-\beta^{\mathrm{warm}}\|^2$ stabilizes estimation when the
+data are noisy or weakly informative.
+
+\paragraph{Why convex--concave iteration is needed.}
+The function $\widehat N_i(\beta)$ is convex.
+Therefore, enforcing $\widehat N_i(\beta) \le N_i$ is convex, while enforcing
+$\widehat N_i(\beta) \ge N_i$ is not.
+The convex--concave procedure (CCP) resolves this asymmetry by:
+\begin{itemize}
+  \item keeping the convex side exact, and
+  \item replacing the nonconvex side with a first-order under-estimator.
+\end{itemize}
+This guarantees that each iteration solves a \emph{convex} optimization problem,
+while progressively tightening the feasible set around a fixed point.
+
+\paragraph{Convergence guarantees (informal).}
+Under standard regularity conditions (positivity of $\Delta$, bounded pressures),
+the CCP sequence $\{\beta^{(r)}\}$ satisfies:
+\begin{itemize}
+  \item monotone decrease of the objective,
+  \item convergence to a stationary point of the original two-sided matching problem.
+\end{itemize}
+We do not claim global optimality; this is unavoidable due to the inherent nonconvexity
+of exact step-count matching.
+In practice, because $\beta^{\mathrm{warm}}$ is already close to a physically meaningful
+solution, convergence is rapid (typically a few iterations).
+
+\paragraph{Engineering interpretation.}
+From a systems perspective, the method can be understood as follows:
+\emph{we adjust step-time coefficients so that, when replaying the observed load profile,
+the simulated engine executes the same number of busy-loop iterations as the real engine,
+up to well-controlled approximation error}.
+This is exactly the requirement needed for accurate discrete-event simulation.
+
+---
+
+\subsection{Worked Numerical Example}
+\label{sec:worked_example}
+
+We illustrate the method on a single prefill phase.
+
+\paragraph{Observed trace data.}
+Consider a request with:
+\begin{itemize}
+  \item prompt length $P = 3000$ tokens,
+  \item chunk size $C = 1024$ tokens,
+  \item observed prefill duration $T = 0.120$ seconds.
+\end{itemize}
+The engine therefore executes
+\[
+N = \lceil P/C \rceil = 3 \quad \text{prefill iterations.}
+\]
+The final iteration processes $r = 3000 - 2\cdot 1024 = 952$ tokens, so the effective
+iteration count is
+\[
+N^{\mathrm{eff}} = 2 + \frac{952}{1024} \approx 2.93.
+\]
+
+\paragraph{Pressure samples.}
+We sample the phase at $m=3$ stratified timestamps and obtain:
+\[
+\begin{array}{c|ccc}
+j & p^{\mathrm{pf}}(t_{j}) & p^{\mathrm{dec}}(t_{j}) & w_j \\
+\hline
+1 & 1024 & 0 & 0.04 \\
+2 & 2048 & 0 & 0.04 \\
+3 & 1024 & 0 & 0.04 \\
+\end{array}
+\]
+so that $\sum_j w_j = T = 0.12$.
+
+\paragraph{Predicted step count.}
+For coefficients $\beta = (\beta_0,\beta_1,\beta_2)$,
+\[
+\widehat N(\beta)
+=
+\sum_{j=1}^{3}
+\frac{0.04}{\beta_0 + \beta_1\,p^{\mathrm{pf}}(t_j)}.
+\]
+
+\paragraph{Upper constraint.}
+The convex upper constraint enforces:
+\[
+\sum_{j=1}^{3}
+\frac{0.04}{\beta_0 + \beta_1\,p^{\mathrm{pf}}(t_j)}
+\;\le\;
+2.93 + u.
+\]
+
+\paragraph{Linearized lower constraint.}
+Given a current iterate $\beta^{(r)}$, we compute:
+\[
+\widehat N(\beta^{(r)})
+\quad\text{and}\quad
+\nabla \widehat N(\beta^{(r)})
+=
+-\sum_{j=1}^{3}
+\frac{0.04\,x_j}{(\beta^{(r)\top} x_j)^2},
+\quad
+x_j = [1,\,p^{\mathrm{pf}}(t_j),\,0]^\top,
+\]
+and impose:
+\[
+\widehat N(\beta^{(r)})
++
+\nabla \widehat N(\beta^{(r)})^\top(\beta-\beta^{(r)})
+\;\ge\;
+2.93 - s.
+\]
+
+\paragraph{Interpretation.}
+If $\beta_1$ is too small, the predicted step durations shrink and
+$\widehat N(\beta)$ exceeds $N^{\mathrm{eff}}$, violating the upper constraint.
+If $\beta_1$ is too large, steps become too slow and the linearized lower constraint
+is violated.
+The optimizer adjusts $\beta_0$ and $\beta_1$ until the simulated step count matches
+the observed count within slack, yielding step-level coefficients consistent with
+the trace.
+
+\paragraph{Outcome.}
+Repeating this process across thousands of phases with diverse pressure profiles
+identifies $\beta_0,\beta_1,\beta_2$ robustly.
+The resulting coefficients can be plugged directly into a discrete-event simulator
+that advances one busy-loop iteration at a time.
+
+---
+
+\paragraph{Takeaway.}
+This example shows concretely how trace-level timing data,
+combined with a convex surrogate for step execution,
+is sufficient to recover step-level execution coefficients without engine instrumentation.
 
 
 
