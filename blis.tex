@@ -727,70 +727,71 @@ theory (provable blackbox convergence), and engineering usability.
 \section{Trace-Only Estimation of Step-Level Execution Coefficients}
 \label{sec:step_beta_estimation}
 
-\subsection{Problem Setup and Goal}
+\subsection{Problem Setup and Objective}
 
-We seek to estimate \emph{step-level} execution coefficients for a vLLM-style inference engine.
-We model each busy-loop iteration (``step'') $k$ as having duration
+We seek to estimate \emph{step-level} execution coefficients for a
+vLLM-style inference engine using \emph{trace data alone}.
+A \emph{step} corresponds to one iteration of the engine’s busy loop.
+At step $k$, execution time is modeled as
 \begin{equation}
 \Delta t_k
-\;=\;
+=
 \beta_0
-\;+\;
++
 \beta_1\,T^{\mathrm{pf}}_k
-\;+\;
++
 \beta_2\,T^{\mathrm{dec}}_k,
 \label{eq:step_model}
 \end{equation}
 where:
 \begin{itemize}
-  \item $\Delta t_k$ is the wall-clock duration of step $k$ (seconds),
-  \item $T^{\mathrm{pf}}_k$ is the number of \emph{prefill tokens} processed in step $k$,
-  \item $T^{\mathrm{dec}}_k$ is the number of \emph{decode tokens} processed in step $k$,
-  \item $\beta_0$ has units of seconds/step (fixed per-step overhead),
-  \item $\beta_1,\beta_2$ have units of seconds/token.
+  \item $\Delta t_k$ is the wall-clock duration of step $k$,
+  \item $T^{\mathrm{pf}}_k$ and $T^{\mathrm{dec}}_k$ are the numbers of
+        prefill and decode tokens processed in that step,
+  \item $\beta_0$ captures fixed per-step overhead (seconds/step),
+  \item $\beta_1$ and $\beta_2$ capture token-dependent costs (seconds/token).
 \end{itemize}
 
-These coefficients are the parameters required by a discrete-event simulator whose atomic
-advance corresponds to one busy-loop iteration.
+\paragraph{Why step-level coefficients matter.}
+Our simulator advances one busy-loop iteration at a time.
+Correct simulation therefore requires reproducing the \emph{number of steps}
+executed under load—not merely aggregate wall-clock time.
+The coefficients $\beta$ determine this step-by-step evolution and are
+the fundamental parameters governing simulator fidelity.
 
-\paragraph{Challenge.}
-Production traces do \emph{not} expose step boundaries or per-step token counts.
-Instead, they provide only request-level phase boundaries (prefill start/end, decode start/end)
-and total token counts.
-Our goal is therefore to infer the step-level coefficients $\beta$ using
-\emph{trace data alone}, without modifying or instrumenting the inference engine.
+\paragraph{Core challenge.}
+Production traces do not expose step boundaries or per-step token counts.
+Instead, they provide only request-level phase boundaries
+(prefill start/end, decode start/end) and aggregate token counts.
+Our goal is to recover step-level coefficients \emph{without}
+instrumenting the inference engine, relying solely on trace observations.
 
 ---
 
-\subsection{From Discrete Steps to a Continuous-Time Surrogate}
+\subsection{Continuous-Time Surrogate for Step Execution}
 
-Let phase instance $i$ denote either:
-\begin{itemize}
-  \item the prefill phase of a request, or
-  \item the decode phase of a request.
-\end{itemize}
-
-From trace data, phase $i$ provides:
+Let $i$ index a phase instance (either prefill or decode) of a request.
+From trace data, each phase provides:
 \begin{itemize}
   \item start and end times $(t_{i,s}, t_{i,e})$,
-  \item duration $T_i = t_{i,e}-t_{i,s}$ (seconds),
-  \item a known number of busy-loop iterations $N_i$ executed during the phase,
-  \item time-varying \emph{token pressures}:
+  \item observed duration $T_i = t_{i,e} - t_{i,s}$,
+  \item observed number of busy-loop iterations $N_i$,
+  \item time-varying token pressures:
   \begin{itemize}
-    \item $p^{\mathrm{pf}}(t)$ = total prefill tokens scheduled per step at wall-clock time $t$,
-    \item $p^{\mathrm{dec}}(t)$ = total decode tokens scheduled per step at wall-clock time $t$,
+    \item $p^{\mathrm{pf}}(t)$: total prefill tokens scheduled per step at time $t$,
+    \item $p^{\mathrm{dec}}(t)$: total decode tokens scheduled per step at time $t$,
   \end{itemize}
-  computed from overlapping requests in the trace.
+  reconstructed from overlapping requests in the trace.
 \end{itemize}
 
-We define a continuous-time analogue of the step duration:
+We define a continuous-time analogue of step duration:
 \begin{equation}
 \Delta(t;\beta)
-\;=\;
+=
 \beta_0
-\;+\;
++
 \beta_1\,p^{\mathrm{pf}}(t)
-\;+\;
++
 \beta_2\,p^{\mathrm{dec}}(t),
 \qquad
 \Delta(t;\beta) > 0.
@@ -798,341 +799,293 @@ We define a continuous-time analogue of the step duration:
 \end{equation}
 
 \paragraph{Interpretation.}
-If pressures were constant, each busy-loop iteration would take $\Delta(t;\beta)$ seconds.
-When pressures vary, the total number of iterations executed over a wall-clock interval
-is approximated by integrating the instantaneous step rate.
+If token pressures were constant, each busy-loop iteration would take
+$\Delta(t;\beta)$ seconds.
+When pressures vary over time, the engine executes steps at an
+instantaneous rate $1/\Delta(t;\beta)$.
 
 ---
 
-\subsection{Predicted Step Count (Convex Surrogate)}
+\subsection{Predicted Step Count as a Convex Surrogate}
 
-We define the \emph{predicted} number of steps during phase $i$ as
+We approximate the number of steps executed during phase $i$ by integrating
+the instantaneous step rate:
 \begin{equation}
 \widehat N_i(\beta)
-\;=\;
+=
 \int_{t_{i,s}}^{t_{i,e}}
 \frac{1}{\Delta(t;\beta)}\,dt.
 \label{eq:Nhat_continuous}
 \end{equation}
 
-\paragraph{Key property.}
-Since $\Delta(t;\beta)$ is affine in $\beta$ and strictly positive,
-the integrand $1/\Delta(t;\beta)$ is convex in $\beta$.
+\paragraph{Convexity.}
+$\Delta(t;\beta)$ is affine and strictly positive in $\beta$,
+so $1/\Delta(t;\beta)$ is convex.
 Therefore, $\widehat N_i(\beta)$ is a convex function of $\beta$.
 
-\paragraph{Discrete approximation.}
-We approximate the integral using $m$ sample points
-$t_{i,1},\ldots,t_{i,m}\in[t_{i,s},t_{i,e}]$ with weights $w_{i,j}$
-satisfying $\sum_j w_{i,j}=T_i$:
+\paragraph{Systems meaning.}
+$\widehat N_i(\beta)$ predicts how many busy-loop iterations a
+step-based simulator would execute when replaying the trace-derived
+load profile.
+Matching $\widehat N_i(\beta)$ to observed step counts is thus the
+correct objective for step-accurate simulation.
+
+---
+
+\subsection{Discrete Approximation via Quadrature}
+
+We approximate Eq.~\eqref{eq:Nhat_continuous} numerically.
+Partition the interval $[t_{i,s}, t_{i,e}]$ into $m$ subintervals
+of width $w_{i,j}=T_i/m$.
+Let $t_{i,j}$ be a representative time in each subinterval.
+
+The predicted step count is approximated as
 \begin{equation}
 \widehat N_i(\beta)
-\;\approx\;
+\approx
 \sum_{j=1}^{m}
 \frac{w_{i,j}}
-{\beta_0 + \beta_1\,p^{\mathrm{pf}}(t_{i,j}) + \beta_2\,p^{\mathrm{dec}}(t_{i,j})}.
+{\beta_0
+ + \beta_1\,p^{\mathrm{pf}}(t_{i,j})
+ + \beta_2\,p^{\mathrm{dec}}(t_{i,j})}.
 \label{eq:Nhat_discrete}
 \end{equation}
-In practice, we use stratified sampling (one sample per equal-width subinterval),
-which yields an unbiased, low-variance estimator.
+
+We use either midpoint quadrature or stratified Monte Carlo sampling;
+both preserve convexity and work well in practice.
 
 ---
 
-\subsection{Matching Observed and Predicted Step Counts}
+\subsection{Effective Token Pressures for Prefill Phases}
+\label{sec:effective_pressures}
 
-Ideally, we would enforce
-\begin{equation}
-\widehat N_i(\beta) = N_i,
-\end{equation}
-but this equality constraint is nonconvex.
-Instead, we use an efficient \emph{convex--concave procedure (CCP)}
-that enforces a two-sided match via successive convex approximations.
+The accuracy of $\widehat N_i(\beta)$ depends on reconstructing
+token pressures faithfully.
+Decode phases are straightforward: each step produces exactly one token.
+Prefill phases are more subtle.
 
----
+\paragraph{Source of bias.}
+Prefill executes in fixed-size chunks of $C$ tokens, except for the final
+iteration, which may process fewer than $C$ tokens.
+Treating the final iteration as a full chunk systematically overestimates
+prefill load—especially when multiple requests complete prefill at
+different times.
 
-\subsection{Convex--Concave Procedure}
+Correcting this bias at the level of step counts is insufficient;
+the correction must be applied directly to the \emph{token pressures}
+that drive step duration.
 
-At iteration $r$, with current estimate $\beta^{(r)}$, we impose:
-
-\paragraph{(A) Upper bound (convex, exact).}
-\begin{equation}
-\widehat N_i(\beta) \;\le\; N_i^{\mathrm{eff}} + u_i,
-\qquad u_i \ge 0,
-\label{eq:upper_constraint}
-\end{equation}
-which is convex because $\widehat N_i(\beta)$ is convex.
-
-\paragraph{(B) Lower bound (linearized, convex).}
-For a convex function $f$, the first-order Taylor expansion
-is a global under-estimator:
+\paragraph{Effective contribution of a request.}
+For a request $r$ with prompt length $P_r$ and $N_r$ prefill iterations,
+the final iteration processes
 \[
-f(\beta) \ge f(\beta^{(r)}) + \nabla f(\beta^{(r)})^\top(\beta-\beta^{(r)}).
+\rho_r = P_r - C\,(N_r - 1), \qquad \rho_r \in (0,C].
 \]
-Applying this to $f=\widehat N_i$ gives the convex constraint
+
+We define the effective per-step prefill contribution:
 \begin{equation}
-\widehat N_i(\beta^{(r)})
-\;+\;
-\nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)})
-\;\ge\;
-N_i^{\mathrm{eff}} - s_i,
-\qquad s_i \ge 0.
-\label{eq:lower_constraint}
+\tilde C_r =
+\begin{cases}
+C, & \text{non-final prefill iterations},\\
+\rho_r, & \text{final prefill iteration}.
+\end{cases}
 \end{equation}
 
-\paragraph{Gradient.}
-From~\eqref{eq:Nhat_discrete},
+\paragraph{Effective pressure aggregation.}
+Let $\mathcal{R}(t)$ be the set of requests executing prefill at time $t$.
+The effective prefill pressure is
 \begin{equation}
-\nabla \widehat N_i(\beta)
+\tilde p^{\mathrm{pf}}(t)
 =
--\sum_{j=1}^{m}
-w_{i,j}\,
-\frac{x_{i,j}}{(\beta^\top x_{i,j})^2},
-\qquad
-x_{i,j} =
-\begin{bmatrix}
-1 \\ p^{\mathrm{pf}}(t_{i,j}) \\ p^{\mathrm{dec}}(t_{i,j})
-\end{bmatrix}.
+\sum_{r\in\mathcal{R}(t)} \tilde C_r(t).
 \end{equation}
 
----
+Because traces do not expose individual iterations, we approximate this by
+distributing the fractional chunk $\rho_r/C$ uniformly over the final
+prefill segment.
+This yields an unbiased estimate of aggregate prefill load.
 
-\subsection{Handling the Final Partial Prefill Chunk}
+All occurrences of $p^{\mathrm{pf}}(t)$ in
+Eqs.~\eqref{eq:delta_t}–\eqref{eq:Nhat_discrete}
+are replaced by $\tilde p^{\mathrm{pf}}(t)$.
 
-For prefill phases, the final iteration may process fewer than the maximum chunk size $C$ tokens.
-To account for this without introducing additional latent variables, we use an
-\emph{effective iteration count}.
+\paragraph{Systems interpretation.}
+This correction prevents systematic overestimation of per-step load near
+prefill completion boundaries, preserving fidelity under overlapping,
+heterogeneous request patterns.
 
-Let:
+\subsection{Baseline: One-Shot Estimation with Known Step Counts}
+\label{sec:duration_baseline}
+
+As a simpler baseline, we estimate step-level execution coefficients using
+\emph{known step counts} but \emph{time-averaged token pressures}.
+This yields a single-shot convex program and serves as a strong point of
+comparison for our sequential step-matching approach.
+
+\paragraph{Baseline modeling assumption.}
+For each phase instance $i$, the trace provides the observed number of
+busy-loop iterations $N_i$.
+We assume that:
 \begin{itemize}
-  \item $P_i$ be the prompt length (tokens),
-  \item $C$ be the prefill chunk size,
-  \item $N_i$ be the observed number of prefill iterations.
+  \item the fixed per-step overhead contributes $\beta_0$ seconds per iteration,
+  \item token-dependent costs accumulate according to time-averaged token
+        pressures over the phase.
 \end{itemize}
 
-Define the remainder:
-\[
-r_i = P_i - C\,(N_i-1), \qquad r_i \in (0,C].
-\]
-
-We then define:
+\paragraph{Phase duration model.}
+Using the continuous-time step duration model from
+Eq.~\eqref{eq:delta_t}, we approximate the phase duration as
 \begin{equation}
-N_i^{\mathrm{eff}}
-\;=\;
-(N_i-1) + \frac{r_i}{C}.
-\label{eq:Neff}
-\end{equation}
-
-For decode phases, where each iteration produces exactly one token, we set
-$N_i^{\mathrm{eff}} = N_i$.
-
-This correction preserves convexity and captures the dominant effect of partial final chunks.
-
----
-
-\subsection{Convex Optimization Problem (Per Iteration)}
-
-At iteration $r$, we solve the following convex quadratic program:
-\begin{align}
-\min_{\beta,\{u_i,s_i\}} \quad
-& \sum_i \left(u_i^2 + s_i^2\right)
-\;+\;
-\lambda \|\beta - \beta^{\mathrm{warm}}\|_2^2
-\\
-\text{s.t.}\quad
-& \widehat N_i(\beta) \le N_i^{\mathrm{eff}} + u_i
-\quad \forall i,
-\\
-& \widehat N_i(\beta^{(r)})
-+ \nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)})
-\ge N_i^{\mathrm{eff}} - s_i
-\quad \forall i,
-\\
-& \beta \ge 0,
-\qquad
-\beta^\top x_{i,j} \ge \varepsilon \quad \forall i,j,
-\end{align}
-where:
-\begin{itemize}
-  \item $\beta^{\mathrm{warm}}$ is a warm-start estimate (e.g., from time-averaged regression),
-  \item $\lambda$ is a regularization parameter,
-  \item $\varepsilon>0$ enforces positivity of step durations.
-\end{itemize}
-
-Each iteration is convex and efficient; convergence is typically achieved in a small number of iterations.
-
----
-
-\subsection{Summary}
-
-This procedure:
-\begin{itemize}
-  \item estimates \emph{step-level} coefficients $\beta$,
-  \item uses \emph{trace data alone} (no engine instrumentation),
-  \item faithfully approximates recursive step execution via a convex surrogate,
-  \item accounts for partial prefill chunks,
-  \item and produces coefficients directly usable in a discrete-event simulator.
-\end{itemize}
-
-Crucially, all nonconvexity is handled through linearization, 
-yielding a sequence of fast, well-conditioned convex problems with clear physical interpretation.
-
-\subsection{Correctness, Identifiability, and Convergence}
-\label{sec:correctness_convergence}
-
-We briefly discuss why the proposed procedure is well-founded, what it guarantees,
-and what it does \emph{not} claim.
-
-\paragraph{Correctness of the surrogate model.}
-The discrete busy-loop execution of the inference engine is governed by the step-level
-relation~\eqref{eq:step_model}. Since step boundaries are unobserved in trace data, we replace
-explicit step simulation by the continuous-time surrogate~\eqref{eq:Nhat_continuous}, which
-counts steps by integrating the instantaneous step rate $1/\Delta(t;\beta)$.
-
-This replacement is standard in discrete-event modeling: the recursion
-``advance by $\Delta(t)$ and repeat'' is a Riemann approximation of the integral
-$\int dt / \Delta(t)$. When pressures vary slowly relative to step durations,
-or when many steps occur within a phase, the approximation error is negligible.
-Importantly, this surrogate preserves the \emph{units} and \emph{semantics} of step-level
-execution: $\widehat N_i(\beta)$ predicts the number of busy-loop iterations, not elapsed time.
-
-\paragraph{Identifiability from trace data.}
-Trace data alone does not uniquely identify the per-step token counts
-$\{T^{\mathrm{pf}}_k, T^{\mathrm{dec}}_k\}$.
-However, the step-level coefficients $\beta$ \emph{are} identifiable under mild conditions:
-the phase instances must exhibit sufficient diversity in the pressure profiles
-$(p^{\mathrm{pf}}(t), p^{\mathrm{dec}}(t))$.
-Intuitively, phases dominated by prefill constrain $\beta_1$, decode-heavy phases constrain
-$\beta_2$, and low-pressure phases constrain $\beta_0$.
-The regularization term $\|\beta-\beta^{\mathrm{warm}}\|^2$ stabilizes estimation when the
-data are noisy or weakly informative.
-
-\paragraph{Why convex--concave iteration is needed.}
-The function $\widehat N_i(\beta)$ is convex.
-Therefore, enforcing $\widehat N_i(\beta) \le N_i$ is convex, while enforcing
-$\widehat N_i(\beta) \ge N_i$ is not.
-The convex--concave procedure (CCP) resolves this asymmetry by:
-\begin{itemize}
-  \item keeping the convex side exact, and
-  \item replacing the nonconvex side with a first-order under-estimator.
-\end{itemize}
-This guarantees that each iteration solves a \emph{convex} optimization problem,
-while progressively tightening the feasible set around a fixed point.
-
-\paragraph{Convergence guarantees (informal).}
-Under standard regularity conditions (positivity of $\Delta$, bounded pressures),
-the CCP sequence $\{\beta^{(r)}\}$ satisfies:
-\begin{itemize}
-  \item monotone decrease of the objective,
-  \item convergence to a stationary point of the original two-sided matching problem.
-\end{itemize}
-We do not claim global optimality; this is unavoidable due to the inherent nonconvexity
-of exact step-count matching.
-In practice, because $\beta^{\mathrm{warm}}$ is already close to a physically meaningful
-solution, convergence is rapid (typically a few iterations).
-
-\paragraph{Engineering interpretation.}
-From a systems perspective, the method can be understood as follows:
-\emph{we adjust step-time coefficients so that, when replaying the observed load profile,
-the simulated engine executes the same number of busy-loop iterations as the real engine,
-up to well-controlled approximation error}.
-This is exactly the requirement needed for accurate discrete-event simulation.
-
----
-
-\subsection{Worked Numerical Example}
-\label{sec:worked_example}
-
-We illustrate the method on a single prefill phase.
-
-\paragraph{Observed trace data.}
-Consider a request with:
-\begin{itemize}
-  \item prompt length $P = 3000$ tokens,
-  \item chunk size $C = 1024$ tokens,
-  \item observed prefill duration $T = 0.120$ seconds.
-\end{itemize}
-The engine therefore executes
-\[
-N = \lceil P/C \rceil = 3 \quad \text{prefill iterations.}
-\]
-The final iteration processes $r = 3000 - 2\cdot 1024 = 952$ tokens, so the effective
-iteration count is
-\[
-N^{\mathrm{eff}} = 2 + \frac{952}{1024} \approx 2.93.
-\]
-
-\paragraph{Pressure samples.}
-We sample the phase at $m=3$ stratified timestamps and obtain:
-\[
-\begin{array}{c|ccc}
-j & p^{\mathrm{pf}}(t_{j}) & p^{\mathrm{dec}}(t_{j}) & w_j \\
-\hline
-1 & 1024 & 0 & 0.04 \\
-2 & 2048 & 0 & 0.04 \\
-3 & 1024 & 0 & 0.04 \\
-\end{array}
-\]
-so that $\sum_j w_j = T = 0.12$.
-
-\paragraph{Predicted step count.}
-For coefficients $\beta = (\beta_0,\beta_1,\beta_2)$,
-\[
-\widehat N(\beta)
+\widehat T_i(\beta)
 =
-\sum_{j=1}^{3}
-\frac{0.04}{\beta_0 + \beta_1\,p^{\mathrm{pf}}(t_j)}.
-\]
-
-\paragraph{Upper constraint.}
-The convex upper constraint enforces:
-\[
-\sum_{j=1}^{3}
-\frac{0.04}{\beta_0 + \beta_1\,p^{\mathrm{pf}}(t_j)}
-\;\le\;
-2.93 + u.
-\]
-
-\paragraph{Linearized lower constraint.}
-Given a current iterate $\beta^{(r)}$, we compute:
-\[
-\widehat N(\beta^{(r)})
-\quad\text{and}\quad
-\nabla \widehat N(\beta^{(r)})
-=
--\sum_{j=1}^{3}
-\frac{0.04\,x_j}{(\beta^{(r)\top} x_j)^2},
-\quad
-x_j = [1,\,p^{\mathrm{pf}}(t_j),\,0]^\top,
-\]
-and impose:
-\[
-\widehat N(\beta^{(r)})
+\beta_0\,N_i
 +
-\nabla \widehat N(\beta^{(r)})^\top(\beta-\beta^{(r)})
-\;\ge\;
-2.93 - s.
-\]
+\beta_1
+\int_{t_{i,s}}^{t_{i,e}}
+\tilde p^{\mathrm{pf}}(t)\,dt
++
+\beta_2
+\int_{t_{i,s}}^{t_{i,e}}
+p^{\mathrm{dec}}(t)\,dt.
+\label{eq:That_baseline_steps}
+\end{equation}
+
+The integrals of token pressures are directly computable from trace-derived
+pressure reconstructions, making $\widehat T_i(\beta)$ affine in $\beta$.
+
+\paragraph{Convex regression problem.}
+We estimate $\beta$ by solving
+\begin{equation}
+\min_{\beta \ge 0}
+\sum_i
+\left(
+\widehat T_i(\beta) - T_i
+\right)^2
++
+\lambda
+\|\beta - \beta^{\mathrm{warm}}\|_2^2,
+\label{eq:duration_regression_steps}
+\end{equation}
+which is a convex quadratic program.
 
 \paragraph{Interpretation.}
-If $\beta_1$ is too small, the predicted step durations shrink and
-$\widehat N(\beta)$ exceeds $N^{\mathrm{eff}}$, violating the upper constraint.
-If $\beta_1$ is too large, steps become too slow and the linearized lower constraint
-is violated.
-The optimizer adjusts $\beta_0$ and $\beta_1$ until the simulated step count matches
-the observed count within slack, yielding step-level coefficients consistent with
-the trace.
+This estimator enforces correctness of step counts by construction:
+the fixed per-step cost $\beta_0$ is multiplied by the observed number of
+busy-loop iterations.
+However, token-dependent costs are accumulated using
+\emph{time-averaged} pressures rather than step-level pressures.
+As a result, the estimator matches phase durations in expectation but does
+not capture how variations in instantaneous load affect step execution.
 
-\paragraph{Outcome.}
-Repeating this process across thousands of phases with diverse pressure profiles
-identifies $\beta_0,\beta_1,\beta_2$ robustly.
-The resulting coefficients can be plugged directly into a discrete-event simulator
-that advances one busy-loop iteration at a time.
+\paragraph{Role in evaluation.}
+This baseline isolates the benefit of explicitly modeling
+\emph{step-level load dynamics}.
+Any performance gap between this estimator and the sequential
+step-matching approach can be attributed to the latter’s ability to
+account for how overlapping requests and fluctuating pressures influence
+busy-loop execution on a step-by-step basis.
 
----
 
-\paragraph{Takeaway.}
-This example shows concretely how trace-level timing data,
-combined with a convex surrogate for step execution,
-is sufficient to recover step-level execution coefficients without engine instrumentation.
+\subsection{Sequential Convex Step-Count Matching}
+\label{sec:ccp_step_matching}
+
+Directly enforcing $\widehat N_i(\beta)=N_i$ is nonconvex because
+$\widehat N_i(\beta)$ is convex in $\beta$.
+Equivalently, the equality decomposes into one convex and one nonconvex inequality:
+$\widehat N_i(\beta)\le N_i$ is convex, while
+$\widehat N_i(\beta)\ge N_i$ is not.
+We resolve this asymmetry with a standard sequential convex (CCP-style) method
+that solves a \emph{convex quadratic program} at each iteration.
+
+\paragraph{Convex--nonconvex split with slacks.}
+For each phase instance $i$, we introduce nonnegative slacks $u_i,s_i\ge 0$ and impose:
+\begin{align}
+\textbf{(Upper bound, convex and exact)} \qquad
+& \widehat N_i(\beta) \;\le\; N_i + u_i,
+\label{eq:ccp_upper}
+\\
+\textbf{(Lower bound, convex after linearization)} \qquad
+& \widehat N_i(\beta) \;\ge\; N_i - s_i.
+\label{eq:ccp_lower_nonconvex}
+\end{align}
+The upper bound \eqref{eq:ccp_upper} is already convex.
+To handle the nonconvex lower bound \eqref{eq:ccp_lower_nonconvex}, we replace
+$\widehat N_i(\beta)$ by a first-order global under-estimator at the current iterate.
+
+\paragraph{Linearized lower bound.}
+At iteration $r$, given $\beta^{(r)}$, convexity yields the global bound
+\[
+\widehat N_i(\beta)
+\;\ge\;
+\widehat N_i(\beta^{(r)})
++
+\nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)}).
+\]
+We therefore enforce the lower bound conservatively via
+\begin{equation}
+\widehat N_i(\beta^{(r)})
++
+\nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)})
+\;\ge\;
+N_i - s_i,
+\qquad s_i\ge 0,
+\label{eq:ccp_lower_linearized}
+\end{equation}
+which is linear in $\beta$ and thus convex.
+
+\paragraph{Per-iteration convex program (QP).}
+Each CCP iteration solves the following convex quadratic program:
+\begin{align}
+\min_{\beta,\{u_i,s_i\}}
+\quad
+& \sum_i \left(u_i^2 + s_i^2\right)
+\;+\;
+\lambda \|\beta-\beta^{\mathrm{warm}}\|_2^2
+\label{eq:ccp_qp_obj}
+\\
+\text{s.t.}\quad
+&
+\widehat N_i(\beta) \le N_i + u_i,
+\qquad u_i \ge 0,
+\quad \forall i,
+\label{eq:ccp_qp_upper}
+\\
+&
+\widehat N_i(\beta^{(r)})
++
+\nabla \widehat N_i(\beta^{(r)})^\top(\beta-\beta^{(r)})
+\ge N_i - s_i,
+\qquad s_i \ge 0,
+\quad \forall i,
+\label{eq:ccp_qp_lower}
+\\
+&
+\beta \ge 0,
+\qquad
+\Delta(t_{i,j};\beta) \ge \varepsilon,
+\quad \forall (i,j).
+\label{eq:ccp_qp_domain}
+\end{align}
+Here $\beta^{\mathrm{warm}}$ is a warm start (e.g., from the one-shot baseline),
+$\lambda>0$ stabilizes the solution when the data is weakly informative,
+and $\varepsilon>0$ ensures the step duration remains strictly positive at
+all quadrature points.
+
+\paragraph{Feasibility vs.\ fitting.}
+This is \emph{not} merely a feasibility procedure.
+The slacks $(u_i,s_i)$ guarantee feasibility, while the objective
+\eqref{eq:ccp_qp_obj} drives both toward zero, i.e., toward two-sided
+step-count matching.
+In the ideal noiseless setting, the optimum achieves $u_i=s_i=0$ for all $i$.
+
+\paragraph{Engineering meaning.}
+Each iteration adjusts $\beta$ so that, under the reconstructed load profile,
+the simulator predicts the same number of busy-loop iterations as observed in
+the trace, while preserving physically meaningful coefficients (nonnegativity
+and positive step times). This directly targets step-accurate discrete-event
+simulation rather than duration-only agreement.
+
+
 
 
 
