@@ -169,6 +169,7 @@ The server emits response $i$ to the
 client. This contributes a network latency that depends linearly 
 on the number of output tokens $\ell_i^{\text{out}}$.
 
+\iffalse
 \subsection{End-to-End request latency model}
 \label{subsec:end-to-end-latency-model}
 
@@ -724,15 +725,18 @@ The strategy is:
 This combination balances practicality (OLS initialization), 
 theory (provable blackbox convergence), and engineering usability.
 
+\fi
+
 \section{Trace-Only Estimation of Step-Level Execution Coefficients}
 \label{sec:step_beta_estimation}
 
-\subsection{Problem Setup and Objective}
+\subsection{Problem Setup: What We Want and What Traces Provide}
 
-We seek to estimate \emph{step-level} execution coefficients for a
+We aim to estimate \emph{step-level} execution coefficients for a
 vLLM-style inference engine using \emph{trace data alone}.
-A \emph{step} corresponds to one iteration of the engine’s busy loop.
-At step $k$, execution time is modeled as
+A \emph{step} is one iteration of the engine's busy loop (i.e., one forward-pass
+cycle that advances prefill and/or decode work for the set of active requests).
+At step $k$, we model the wall-clock step duration as
 \begin{equation}
 \Delta t_k
 =
@@ -743,31 +747,177 @@ At step $k$, execution time is modeled as
 \beta_2\,T^{\mathrm{dec}}_k,
 \label{eq:step_model}
 \end{equation}
-where:
-\begin{itemize}
-  \item $\Delta t_k$ is the wall-clock duration of step $k$,
-  \item $T^{\mathrm{pf}}_k$ and $T^{\mathrm{dec}}_k$ are the numbers of
-        prefill and decode tokens processed in that step,
-  \item $\beta_0$ captures fixed per-step overhead (seconds/step),
-  \item $\beta_1$ and $\beta_2$ capture token-dependent costs (seconds/token).
-\end{itemize}
+where $\beta_0$ is a fixed per-step overhead (seconds/step), and
+$\beta_1,\beta_2$ are token-proportional costs (seconds/token) for
+prefill and decode tokens, respectively.
+The quantities $T^{\mathrm{pf}}_k$ and $T^{\mathrm{dec}}_k$ denote the total number
+of prefill and decode tokens processed \emph{in that step} across all requests.
 
 \paragraph{Why step-level coefficients matter.}
 Our simulator advances one busy-loop iteration at a time.
-Correct simulation therefore requires reproducing the \emph{number of steps}
-executed under load—not merely aggregate wall-clock time.
-The coefficients $\beta$ determine this step-by-step evolution and are
-the fundamental parameters governing simulator fidelity.
+Accurate simulation therefore requires predicting not only aggregate phase
+durations, but also how many steps execute under load and how step time changes
+as the set of active requests evolves.
+The coefficients $\beta$ in Eq.~\eqref{eq:step_model} are the basic parameters
+that govern this step-by-step evolution.
 
-\paragraph{Core challenge.}
-Production traces do not expose step boundaries or per-step token counts.
-Instead, they provide only request-level phase boundaries
-(prefill start/end, decode start/end) and aggregate token counts.
-Our goal is to recover step-level coefficients \emph{without}
-instrumenting the inference engine, relying solely on trace observations.
+\paragraph{Trace-only challenge.}
+Production traces typically do \emph{not} expose step boundaries or per-step token
+counts $\{T^{\mathrm{pf}}_k,T^{\mathrm{dec}}_k\}$.
+Instead, traces expose request-level \emph{phase instances} with:
+(i) prefill start/end timestamps, (ii) decode start/end timestamps,
+(iii) aggregate token counts for each phase, and (iv) the total number of
+busy-loop iterations executed during that phase.\footnote{In our setting, the
+phase-level step count is available from standard runtime tracing/counters, but
+the time and token composition of individual steps is not.}
+The central estimation problem is therefore: \emph{given phase-level trace
+summaries, estimate the step-level coefficients $\beta$ that best explain the
+observed phase durations.}
 
----
+\subsection{Trace-Derived Pressures and a Prefill Correction}
+\label{sec:effective_pressures}
 
+We next define the trace-derived quantities used by our baseline estimator.
+
+\paragraph{Phase instances.}
+Let $i$ index a single phase instance (prefill or decode) of a request.
+The trace provides:
+start time $t_{i,s}$, end time $t_{i,e}$, observed duration
+\begin{equation}
+T_i = t_{i,e}-t_{i,s},
+\end{equation}
+and observed step count $N_i \in \mathbb{N}$ (the number of busy-loop iterations
+executed while this phase was active).
+
+\paragraph{Token pressures.}
+To connect phase-level observations to the step model in
+Eq.~\eqref{eq:step_model}, we work with \emph{token pressures}---the total tokens
+scheduled per step by the engine at time $t$:
+\begin{itemize}
+  \item $p^{\mathrm{pf}}(t)$: total prefill tokens scheduled per step at time $t$,
+  \item $p^{\mathrm{dec}}(t)$: total decode tokens scheduled per step at time $t$.
+\end{itemize}
+These functions are reconstructed from trace-visible overlaps among requests and
+their phase-level token counts (the exact reconstruction procedure is
+deterministic and does not require engine instrumentation; we use it only as an
+input signal to the regression below).
+
+\paragraph{Prefill chunking and a bias in naive pressures.}
+Decode is straightforward: each active decode request contributes one token per
+step, so aggregating decode pressure is exact.
+Prefill is chunked: each request prefill proceeds in chunks of size $C$ tokens
+per step, except for the final prefill step, which may process fewer than $C$
+tokens. If we treat every prefill step as a full chunk, we systematically
+overestimate prefill load near completion boundaries, especially under
+overlapping requests.
+
+\paragraph{Effective prefill pressure.}
+Consider a request $r$ with prompt length $P_r$ tokens and $N_r$ prefill steps.
+The final prefill step processes
+\begin{equation}
+\rho_r = P_r - C\,(N_r-1),
+\qquad
+\rho_r \in (0,C].
+\label{eq:rho_def}
+\end{equation}
+Define the \emph{effective} per-step prefill contribution of request $r$ as
+\begin{equation}
+\tilde C_r(k) =
+\begin{cases}
+C, & \text{for non-final prefill steps},\\
+\rho_r, & \text{for the final prefill step}.
+\end{cases}
+\label{eq:Cr_tilde}
+\end{equation}
+Let $\mathcal{R}(t)$ be the set of requests executing prefill at time $t$.
+The effective prefill pressure is then
+\begin{equation}
+\tilde p^{\mathrm{pf}}(t)
+=
+\sum_{r \in \mathcal{R}(t)} \tilde C_r(t).
+\label{eq:pf_pressure_tilde}
+\end{equation}
+Because traces do not reveal which prefill step is ``final'' at any instant,
+we implement Eq.~\eqref{eq:pf_pressure_tilde} by distributing the fractional
+chunk $\rho_r/C$ uniformly over the last prefill segment of request $r$.
+This preserves the correct aggregate prefill token mass while avoiding a
+systematic overestimate at prefill completion.
+
+\subsection{Baseline: One-Shot Estimation from Phase Durations}
+\label{sec:duration_baseline}
+
+We now present a trace-only baseline estimator for $\beta$.
+It uses phase-level step counts $N_i$ to account for fixed per-step overhead,
+but it aggregates token-dependent work through \emph{time-integrated pressures}
+rather than step-resolved dynamics.
+This produces a simple, single-shot convex regression problem and serves as a
+strong reference point for more detailed step-matching estimators.
+
+\paragraph{Baseline assumption.}
+Over the lifetime of phase instance $i$, we assume that:
+(i) each of its $N_i$ busy-loop iterations incurs a fixed overhead $\beta_0$, and
+(ii) token-dependent costs accumulate proportionally to the total amount of
+prefill and decode work scheduled while the phase is active.
+
+\paragraph{Phase duration predictor.}
+Define the integrated (time-accumulated) pressures over the phase interval
+$[t_{i,s},t_{i,e}]$:
+\begin{equation}
+A^{\mathrm{pf}}_i
+=
+\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt,
+\qquad
+A^{\mathrm{dec}}_i
+=
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt.
+\label{eq:pressure_areas}
+\end{equation}
+These are directly computable from trace-derived pressures.
+The baseline predicts phase duration as the affine model
+\begin{equation}
+\widehat T_i(\beta)
+=
+\beta_0\,N_i
++
+\beta_1\,A^{\mathrm{pf}}_i
++
+\beta_2\,A^{\mathrm{dec}}_i.
+\label{eq:That_baseline_steps}
+\end{equation}
+
+\paragraph{One-shot convex regression.}
+Given a collection of phase instances $\mathcal{I}$, we estimate $\beta$ via
+regularized least squares:
+\begin{equation}
+\min_{\beta \in \mathbb{R}^3_{\ge 0}}
+\;\;
+\sum_{i \in \mathcal{I}}
+\left(
+\widehat T_i(\beta) - T_i
+\right)^2
++
+\lambda \,\|\beta - \beta^{\mathrm{warm}}\|_2^2,
+\label{eq:duration_regression_steps}
+\end{equation}
+where $\lambda \ge 0$ controls shrinkage toward a warm-start
+$\beta^{\mathrm{warm}}$ (e.g., a prior estimate from controlled microbenchmarks).
+Because $\widehat T_i(\beta)$ is affine in $\beta$, the objective in
+Eq.~\eqref{eq:duration_regression_steps} is a convex quadratic program.
+
+\paragraph{What this baseline captures---and what it misses.}
+Equation~\eqref{eq:That_baseline_steps} uses the observed step count $N_i$ to
+model fixed per-step overhead exactly: each additional busy-loop iteration
+increases predicted time by $\beta_0$.
+Token-dependent work, however, is summarized only through integrated pressures
+$A^{\mathrm{pf}}_i$ and $A^{\mathrm{dec}}_i$, which discard how load varies
+\emph{across steps} as requests enter and exit.
+Consequently, the estimator can fit phase durations well in aggregate while
+still failing to reproduce step-level dynamics under rapidly changing overlap.
+In evaluation, this baseline therefore isolates the value of explicitly
+modeling step-resolved load variation beyond time-averaged (integrated) signals.
+
+
+\iffalse 
 \subsection{Continuous-Time Surrogate for Step Execution}
 
 Let $i$ index a phase instance (either prefill or decode) of a request.
@@ -853,138 +1003,6 @@ The predicted step count is approximated as
 
 We use either midpoint quadrature or stratified Monte Carlo sampling;
 both preserve convexity and work well in practice.
-
----
-
-\subsection{Effective Token Pressures for Prefill Phases}
-\label{sec:effective_pressures}
-
-The accuracy of $\widehat N_i(\beta)$ depends on reconstructing
-token pressures faithfully.
-Decode phases are straightforward: each step produces exactly one token.
-Prefill phases are more subtle.
-
-\paragraph{Source of bias.}
-Prefill executes in fixed-size chunks of $C$ tokens, except for the final
-iteration, which may process fewer than $C$ tokens.
-Treating the final iteration as a full chunk systematically overestimates
-prefill load—especially when multiple requests complete prefill at
-different times.
-
-Correcting this bias at the level of step counts is insufficient;
-the correction must be applied directly to the \emph{token pressures}
-that drive step duration.
-
-\paragraph{Effective contribution of a request.}
-For a request $r$ with prompt length $P_r$ and $N_r$ prefill iterations,
-the final iteration processes
-\[
-\rho_r = P_r - C\,(N_r - 1), \qquad \rho_r \in (0,C].
-\]
-
-We define the effective per-step prefill contribution:
-\begin{equation}
-\tilde C_r =
-\begin{cases}
-C, & \text{non-final prefill iterations},\\
-\rho_r, & \text{final prefill iteration}.
-\end{cases}
-\end{equation}
-
-\paragraph{Effective pressure aggregation.}
-Let $\mathcal{R}(t)$ be the set of requests executing prefill at time $t$.
-The effective prefill pressure is
-\begin{equation}
-\tilde p^{\mathrm{pf}}(t)
-=
-\sum_{r\in\mathcal{R}(t)} \tilde C_r(t).
-\end{equation}
-
-Because traces do not expose individual iterations, we approximate this by
-distributing the fractional chunk $\rho_r/C$ uniformly over the final
-prefill segment.
-This yields an unbiased estimate of aggregate prefill load.
-
-All occurrences of $p^{\mathrm{pf}}(t)$ in
-Eqs.~\eqref{eq:delta_t}–\eqref{eq:Nhat_discrete}
-are replaced by $\tilde p^{\mathrm{pf}}(t)$.
-
-\paragraph{Systems interpretation.}
-This correction prevents systematic overestimation of per-step load near
-prefill completion boundaries, preserving fidelity under overlapping,
-heterogeneous request patterns.
-
-\subsection{Baseline: One-Shot Estimation with Known Step Counts}
-\label{sec:duration_baseline}
-
-As a simpler baseline, we estimate step-level execution coefficients using
-\emph{known step counts} but \emph{time-averaged token pressures}.
-This yields a single-shot convex program and serves as a strong point of
-comparison for our sequential step-matching approach.
-
-\paragraph{Baseline modeling assumption.}
-For each phase instance $i$, the trace provides the observed number of
-busy-loop iterations $N_i$.
-We assume that:
-\begin{itemize}
-  \item the fixed per-step overhead contributes $\beta_0$ seconds per iteration,
-  \item token-dependent costs accumulate according to time-averaged token
-        pressures over the phase.
-\end{itemize}
-
-\paragraph{Phase duration model.}
-Using the continuous-time step duration model from
-Eq.~\eqref{eq:delta_t}, we approximate the phase duration as
-\begin{equation}
-\widehat T_i(\beta)
-=
-\beta_0\,N_i
-+
-\beta_1
-\int_{t_{i,s}}^{t_{i,e}}
-\tilde p^{\mathrm{pf}}(t)\,dt
-+
-\beta_2
-\int_{t_{i,s}}^{t_{i,e}}
-p^{\mathrm{dec}}(t)\,dt.
-\label{eq:That_baseline_steps}
-\end{equation}
-
-The integrals of token pressures are directly computable from trace-derived
-pressure reconstructions, making $\widehat T_i(\beta)$ affine in $\beta$.
-
-\paragraph{Convex regression problem.}
-We estimate $\beta$ by solving
-\begin{equation}
-\min_{\beta \ge 0}
-\sum_i
-\left(
-\widehat T_i(\beta) - T_i
-\right)^2
-+
-\lambda
-\|\beta - \beta^{\mathrm{warm}}\|_2^2,
-\label{eq:duration_regression_steps}
-\end{equation}
-which is a convex quadratic program.
-
-\paragraph{Interpretation.}
-This estimator enforces correctness of step counts by construction:
-the fixed per-step cost $\beta_0$ is multiplied by the observed number of
-busy-loop iterations.
-However, token-dependent costs are accumulated using
-\emph{time-averaged} pressures rather than step-level pressures.
-As a result, the estimator matches phase durations in expectation but does
-not capture how variations in instantaneous load affect step execution.
-
-\paragraph{Role in evaluation.}
-This baseline isolates the benefit of explicitly modeling
-\emph{step-level load dynamics}.
-Any performance gap between this estimator and the sequential
-step-matching approach can be attributed to the latter’s ability to
-account for how overlapping requests and fluctuating pressures influence
-busy-loop execution on a step-by-step basis.
-
 
 \subsection{Sequential Convex Step-Count Matching}
 \label{sec:ccp_step_matching}
@@ -1085,12 +1103,12 @@ the trace, while preserving physically meaningful coefficients (nonnegativity
 and positive step times). This directly targets step-accurate discrete-event
 simulation rather than duration-only agreement.
 
-
-
-
-
 We may also want to read, use and cite ... https://arxiv.org/pdf/2302.02536 and variants
 like https://www.jhuapl.edu/spsa/pdf-spsa/bhatnagar\_kowshick\_simulation05.pdf.
+
+\fi
+
+
 
 \section{Evaluation}
 \label{sec:evaluation}
