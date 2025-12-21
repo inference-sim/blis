@@ -885,6 +885,7 @@ The baseline predicts phase duration as the affine model
 \label{eq:That_baseline_steps}
 \end{equation}
 
+\iffalse
 \paragraph{One-shot convex regression.}
 Given a collection of phase instances $\mathcal{I}$, we estimate $\beta$ via
 regularized least squares:
@@ -915,6 +916,138 @@ Consequently, the estimator can fit phase durations well in aggregate while
 still failing to reproduce step-level dynamics under rapidly changing overlap.
 In evaluation, this baseline therefore isolates the value of explicitly
 modeling step-resolved load variation beyond time-averaged (integrated) signals.
+\fi
+
+\subsubsection{Non-Negative Linear Regression ($\lambda = 0$)}
+\label{sec:nnls_simplification}
+Given a collection of phase instances $\mathcal{I}$, we estimate $\beta$ via 
+\emph{non-negative linear least
+squares} (NNLS):
+\begin{equation}
+\min_{\beta \in \mathbb{R}^3_{\ge 0}}
+\;\;
+\sum_{i \in \mathcal{I}}
+\left(
+\beta_0\,N_i
++
+\beta_1\,A^{\mathrm{pf}}_i
++
+\beta_2\,A^{\mathrm{dec}}_i
+-
+T_i
+\right)^2 .
+\label{eq:nnls_duration}
+\end{equation}
+
+\paragraph{Interpretation.}
+In this form, the regression directly decomposes each observed phase duration
+into three additive contributions:
+a fixed cost per busy-loop iteration ($\beta_0 N_i$),
+a cost proportional to cumulative prefill pressure
+($\beta_1 A^{\mathrm{pf}}_i$),
+and a cost proportional to cumulative decode pressure
+($\beta_2 A^{\mathrm{dec}}_i$).
+The non-negativity constraints enforce physically meaningful coefficients:
+negative per-step overheads or negative per-token costs are ruled out by design.
+
+\paragraph{Why NNLS is a useful baseline.}
+The NNLS formulation has no hyperparameters, requires no warm-start, and can be
+solved efficiently with standard convex solvers.
+It therefore serves as a transparent, \emph{data-driven} baseline for
+trace-only estimation.
+Any improvement achieved by more sophisticated estimators—such as
+step-resolved matching or iterative refinement—can be cleanly attributed to
+better modeling of within-phase step dynamics rather than regularization or
+prior information.
+
+\paragraph{What this baseline captures---and what it misses.}
+Equation~\eqref{eq:That_baseline_steps} uses the observed step count $N_i$ to
+model fixed per-step overhead exactly: each additional busy-loop iteration
+increases predicted time by $\beta_0$.
+Token-dependent work, however, is summarized only through integrated pressures
+$A^{\mathrm{pf}}_i$ and $A^{\mathrm{dec}}_i$, which discard how load varies
+\emph{across steps} as requests enter and exit.
+Consequently, the estimator can fit phase durations well in aggregate while
+still failing to reproduce step-level dynamics under rapidly changing overlap.
+In evaluation, this baseline therefore isolates the value of explicitly
+modeling step-resolved load variation beyond time-averaged (integrated) signals.
+
+
+\subsubsection{Stabilizing NNLS via Feature Normalization and Cross-Fitting}
+\label{sec:nnls_crossfit}
+
+While the NNLS formulation in Eq.~\eqref{eq:nnls_duration} is simple and
+interpretable, in practice it can exhibit sensitivity to trace composition and
+numerical conditioning when pressure features have very different scales or when
+the trace set provides limited excitation along certain dimensions.
+We therefore adopt a lightweight stabilization procedure that preserves the
+trace-only and convex nature of the estimator, without introducing an explicit
+regularization term.
+
+\paragraph{Feature normalization.}
+Let $x_i = (N_i, A^{\mathrm{pf}}_i, A^{\mathrm{dec}}_i)$ denote the feature vector
+for phase instance $i$.
+We rescale each feature dimension by a fixed, data-derived positive scale
+$s_j > 0$, computed once over the full trace set:
+\begin{equation}
+\tilde x_{ij} = \frac{x_{ij}}{s_j},
+\qquad
+s_j = \mathrm{scale}\bigl(\{x_{ij}\}_{i \in \mathcal{I}}\bigr),
+\label{eq:feature_scaling}
+\end{equation}
+where $\mathrm{scale}(\cdot)$ denotes a robust column scale such as the RMS or
+median.
+This scale-only normalization improves numerical conditioning and reduces
+spurious changes in the NNLS active set caused purely by feature magnitude
+differences, while preserving the physical interpretation that zero features
+correspond to zero scheduled work.
+All NNLS solves described below are performed in the normalized feature space,
+with coefficients mapped back to physical units afterward.
+
+
+\paragraph{Cross-fitting with NNLS.}
+To reduce sensitivity to the specific set of phase instances included in the fit,
+we use $K$-fold cross-fitting.
+The trace instances are partitioned into $K$ disjoint folds
+$\{\mathcal{I}_1,\dots,\mathcal{I}_K\}$.
+For each fold $k$, we solve the NNLS problem on the remaining data:
+\begin{equation}
+\hat\beta^{(k)}_{\mathrm{norm}}
+=
+\arg\min_{\beta \ge 0}
+\sum_{i \in \mathcal{I}\setminus\mathcal{I}_k}
+\left(
+\beta^\top \tilde x_i - T_i
+\right)^2 .
+\label{eq:nnls_crossfit_solve}
+\end{equation}
+The resulting coefficients are then mapped back to the original units via
+$\hat\beta^{(k)}_j = \hat\beta^{(k)}_{\mathrm{norm},j} / s_j$.
+
+\paragraph{Aggregation and final estimate.}
+The final coefficient estimate is obtained by aggregating across folds:
+\begin{equation}
+\hat\beta^{\mathrm{final}}
+=
+\mathrm{median}_{k=1,\dots,K}
+\;
+\hat\beta^{(k)} .
+\label{eq:nnls_crossfit_aggregate}
+\end{equation}
+We use the coordinate-wise median rather than the mean to improve robustness in
+regimes where NNLS constraints intermittently bind (e.g., when a coefficient is
+driven to zero in some folds but not others).
+
+\paragraph{Interpretation and diagnostics.}
+This procedure can be viewed as enforcing \emph{reproducibility across trace
+subsets} rather than shrinking coefficients toward a prior.
+Fold-to-fold variation in $\hat\beta^{(k)}$ provides a direct diagnostic of
+parameter identifiability: large variance or frequent constraint activation
+indicates that the trace set does not sufficiently excite the corresponding
+dimension of the step model.
+Importantly, the estimator remains trace-only and convex at every stage, and
+does not rely on engine instrumentation or external calibration.
+
 
 
 \iffalse 
