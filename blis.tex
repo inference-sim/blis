@@ -993,6 +993,11 @@ non-negative least squares:
 \label{eq:baseline_nnls}
 \end{equation}
 
+We emphasize that the simulator consumes 
+only $\beta$ and its own internally generated state. 
+It does not consume any trace-derived timing information, phase durations, 
+or other artifacts created during the estimation of $\beta$.
+
 \paragraph{Limitation of the baseline.}
 This estimator remains wall-clock--weighted because $A_i^{\mathrm{pf}}$ and
 $A_i^{\mathrm{dec}}$ are formed by integrating over time within each phase,
