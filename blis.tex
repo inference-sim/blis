@@ -735,10 +735,10 @@ This section presents a trace-only methodology for estimating
 We proceed in three stages.
 First, we introduce a simple but principled baseline estimator that fits
 phase durations using time-integrated workload signals.
-Second, we refine this estimator using an iterative, step-resolved
-reweighting procedure inspired by majorization--minimization (MM).
-Finally, we provide intuitive mathematical justification, discuss robustness,
-and outline practical limitations and calibration considerations.
+Second, we refine this estimator using an iterative, step-density--reweighted
+procedure inspired by majorization--minimization (MM).
+Finally, we discuss robustness, calibration workload design, and practical
+limitations.
 
 Throughout, we emphasize trace-only operation: no step boundaries,
 per-step timings, or engine instrumentation are assumed.
@@ -752,8 +752,7 @@ a single logical busy-loop.
 Each busy-loop iteration (a \emph{step}) executes one forward-pass cycle
 that may process prefill tokens, decode tokens, or both, for a set of
 concurrently active requests.
-Steps are assumed to execute sequentially, with instantaneous request
-overlaps summarized by aggregate token loads.
+Steps are assumed to execute sequentially.
 
 Let $k$ index busy-loop steps.
 We model the wall-clock duration of step $k$ as
@@ -776,9 +775,8 @@ where:
 \end{itemize}
 
 This affine step-time model is the fundamental abstraction used by our
-simulator.
-Accurate simulation therefore requires identifying the coefficient vector
-$\beta=(\beta_0,\beta_1,\beta_2)$.
+simulator. Accurate simulation therefore requires identifying the
+coefficient vector $\beta=(\beta_0,\beta_1,\beta_2)$.
 
 \paragraph{What traces provide.}
 Production traces do not expose step boundaries or per-step token counts.
@@ -798,11 +796,11 @@ The estimation problem is therefore:
 $\beta$ in Eq.~\eqref{eq:step_model}.}
 
 % ============================================================
-\subsection{Trace-Derived Token Pressures and Prefill Correction}
+\subsection{Trace-Derived Token Pressures}
 \label{sec:pressures}
 
 To relate phase-level observations to step-level execution, we reconstruct
-\emph{token pressures} from trace-visible overlaps among requests.
+time-varying \emph{token pressures} from trace-visible request overlap.
 
 \paragraph{Token pressures.}
 Let
@@ -812,12 +810,15 @@ Let
   \item $p^{\mathrm{dec}}(t)$ denote the total number of decode tokens
         processed \emph{per step} at time $t$.
 \end{itemize}
-These functions are deterministically reconstructed from traces using
+These functions are reconstructed deterministically from traces using
 request overlap, known per-request token counts, and the engine’s
 scheduling semantics.
 They are expressed in units of tokens per step (not tokens per unit time).
 
-\paragraph{Prefill chunking correction.}
+% ============================================================
+\subsection{Prefill Chunking and Partial-Chunk Correction}
+\label{sec:prefill_correction}
+
 Decode contributes exactly one token per active request per step.
 Prefill, however, proceeds in chunks of size $C$ tokens per step, except for
 the final prefill step of a request, which may process fewer than $C$ tokens.
@@ -830,22 +831,58 @@ prefill step processes
 \qquad \rho_r \in (0,C].
 \label{eq:rho_def}
 \end{equation}
-We define the effective per-step prefill contribution
+The missing token mass relative to a full chunk is
+\[
+\Delta_r = C - \rho_r \in [0,C).
+\]
+
+\paragraph{Naive full-chunk pressure.}
+Let $a_r(t)\in\{0,1\}$ indicate whether request $r$ is in prefill at time $t$,
+as determined from trace-visible phase boundaries.
+The naive full-chunk prefill pressure is
 \begin{equation}
-\tilde C_r(k) =
-\begin{cases}
-C, & \text{non-final prefill steps},\\
-\rho_r, & \text{final prefill step}.
-\end{cases}
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+=
+C \sum_r a_r(t).
 \end{equation}
 
-Because traces do not reveal which busy-loop iteration is the final prefill
-step of a request, we approximate its effect by uniformly redistributing the
-fractional mass ratio $\rho_r/C$ across the prefill segment of the request.
-This preserves total prefill token mass while avoiding boundary bias, at the
-cost of smoothing localized end-of-prefill effects.
+\paragraph{End-localized partial-chunk correction.}
+The missing mass $\Delta_r$ should be subtracted from the prefill pressure
+near the end of request $r$’s prefill phase.
+Because traces do not expose global step boundaries, we localize this
+correction in time using a weighting function.
 
-Let $\tilde p^{\mathrm{pf}}(t)$ denote the resulting effective prefill pressure.
+Let $t_{r,\mathrm{pf\mbox{-}end}}$ denote the trace-visible end time of request
+$r$’s prefill phase.
+Define a nonnegative correction weight $w_r(t)$ supported near
+$t_{r,\mathrm{pf\mbox{-}end}}$ and normalized such that
+\[
+\int w_r(t)\,dt = 1.
+\]
+The refined effective prefill pressure is
+\begin{equation}
+\tilde p^{\mathrm{pf}}(t)
+=
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+-
+\sum_r \Delta_r\, w_r(t).
+\label{eq:refined_prefill_pressure}
+\end{equation}
+This construction preserves total prefill token mass exactly while
+localizing the partial-chunk correction near the end of prefill.
+
+\paragraph{Uniform redistribution as a special case.}
+If $w_r(t)$ is chosen uniform over the prefill interval of request $r$, then
+Eq.~\eqref{eq:refined_prefill_pressure} reduces to uniform redistribution of
+$\rho_r/C$ across the prefill segment.
+This simple choice avoids boundary assumptions but smooths localized effects.
+
+\paragraph{Step-density--weighted localization.}
+In the iterative estimator introduced below, we choose $w_r(t)$ proportional
+to the estimated step density, restricted to a short trailing window before
+$t_{r,\mathrm{pf\mbox{-}end}}$.
+This places the correction in \emph{step coordinates} rather than arbitrary
+wall time, improving alignment with the underlying execution model.
 
 % ============================================================
 \subsection{Baseline: Time-Integrated NNLS Estimation}
@@ -853,8 +890,6 @@ Let $\tilde p^{\mathrm{pf}}(t)$ denote the resulting effective prefill pressure.
 
 We first present a simple, trace-only baseline estimator that fits phase
 durations using time-integrated pressures.
-This estimator is intentionally \emph{not} step-resolved and serves as a
-reference point for more detailed methods.
 
 \paragraph{Integrated pressures.}
 For phase instance $i$, define
@@ -894,20 +929,17 @@ non-negative least squares:
 \label{eq:baseline_nnls}
 \end{equation}
 
-\paragraph{Limitation of the baseline.}
-Even with unlimited data, this estimator converges to coefficients that are
-weighted by wall-clock time rather than by step count.
-As a result, periods in which steps are long exert disproportionate influence,
-and the estimator matches time-integrated behavior rather than true
-step-averaged execution costs.
+\paragraph{Limitation.}
+This estimator fits wall-clock--weighted behavior.
+Periods with long steps exert disproportionate influence, and the estimator
+converges to time-averaged rather than step-averaged execution costs.
 
 % ============================================================
 \subsection{Step-Density Reweighted Estimation}
 \label{sec:step_density}
 
-We now introduce an iterative estimator that moves from wall-clock--weighted
-fitting toward step-resolved fitting by explicitly modeling how step density
-varies over time.
+We now introduce an iterative estimator that shifts fitting from wall-clock
+weighting toward step-level weighting.
 
 \subsubsection{Local Step-Time Model and Step Density}
 
@@ -923,9 +955,13 @@ Given instantaneous pressures, we model the (latent) step duration at time $t$ a
 \qquad \Delta(t;\beta) > 0.
 \label{eq:local_step_time}
 \end{equation}
-In practice we enforce $\Delta(t;\beta) \ge \varepsilon > 0$ for numerical
-stability.
-The corresponding step density (steps per unit time) is
+
+Thus, $\Delta(t;\beta)$ represents the instantaneous duration of a busy-loop
+step that would be executed at time $t$ given the token pressures observed at
+that moment and execution coefficients $\beta$.
+
+
+The corresponding step density is
 \begin{equation}
 \lambda(t;\beta) = \frac{1}{\Delta(t;\beta)}.
 \label{eq:step_density}
@@ -933,33 +969,23 @@ The corresponding step density (steps per unit time) is
 
 \subsubsection{Normalized Step Density within a Phase}
 
-For phase instance $i$, define the total step mass
-\begin{equation}
+For phase instance $i$, define
+\[
 \Lambda_i(\beta)
 =
-\int_{t_{i,s}}^{t_{i,e}} \lambda(t;\beta)\,dt.
-\end{equation}
-We then define a normalized density
-\begin{equation}
+\int_{t_{i,s}}^{t_{i,e}} \lambda(t;\beta)\,dt,
+\qquad
 q_i(t;\beta)
 =
-\frac{\lambda(t;\beta)}{\Lambda_i(\beta)},
-\qquad
-\int_{t_{i,s}}^{t_{i,e}} q_i(t;\beta)\,dt = 1.
-\label{eq:qi_density}
-\end{equation}
-
-\paragraph{Interpretation.}
-We emphasize that $N_i$ is a trace-inferred step count and is treated as fixed
-throughout.
-The quantity $\Lambda_i(\beta)$ is used only to normalize $\lambda(t;\beta)$
-into a within-phase weighting $q_i(t;\beta)$.
-Intuitively, $q_i$ estimates \emph{where in time} the $N_i$ steps occur, not
-\emph{how many} steps occurred.
+\frac{\lambda(t;\beta)}{\Lambda_i(\beta)}.
+\]
+By construction, $\int q_i(t;\beta)\,dt = 1$.
+The trace-inferred step count $N_i$ is treated as fixed; $q_i$ estimates where
+those steps occur in time.
 
 \subsubsection{Step-Averaged Pressures}
 
-Using $q_i(t;\beta)$, we define step-averaged pressures:
+Define
 \begin{equation}
 \bar p^{\mathrm{pf}}_i(\beta)
 =
@@ -970,7 +996,6 @@ Using $q_i(t;\beta)$, we define step-averaged pressures:
 \int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i(t;\beta)\,dt.
 \label{eq:step_averaged_pressures}
 \end{equation}
-These quantities represent expected per-step token loads.
 
 \subsubsection{MM-Style Iterative NNLS}
 
@@ -992,86 +1017,35 @@ T_i
 \right)^2 .
 \label{eq:sr_nnls}
 \end{equation}
-For numerical stability we optionally apply damping
-$\beta^{(r+1)} \leftarrow (1-\eta)\beta^{(r)} + \eta\beta^{(r+1)}$.
-
-We initialize $\beta^{(0)}$ using the baseline NNLS estimator
-(Section~\ref{sec:baseline}).
+Optional damping
+$\beta^{(r+1)} \leftarrow (1-\eta)\beta^{(r)} + \eta\beta^{(r+1)}$
+improves numerical stability.
 
 % ============================================================
-\subsection{Robust Step-Density Reweighted Estimation}
-\label{sec:robust_step_density}
+\subsection{Robust Estimation and Fixed-Point View}
+\label{sec:robust_fixed_point}
 
-To mitigate rare but unavoidable outliers in production traces (e.g.,
-transient host interference or delayed scheduling), we replace the squared
-loss with a robust alternative.
-
-Let the iteration-conditioned residual be
-\begin{equation}
-r_i^{(r)}(\beta)
-=
-N_i\beta_0
-+
-N_i\bar p^{\mathrm{pf}}_i(\beta^{(r)})\beta_1
-+
-N_i\bar p^{\mathrm{dec}}_i(\beta^{(r)})\beta_2
--
-T_i .
-\end{equation}
-
-We use the Huber loss $\rho_\delta(\cdot)$ and solve
-\begin{equation}
-\beta^{(r+1)}
-=
-\arg\min_{\beta\ge0}
-\sum_{i\in\mathcal{I}}
-\rho_\delta\!\left(r_i^{(r)}(\beta)\right).
-\end{equation}
-This problem is convex and can be solved efficiently using standard methods.
-
-% ============================================================
-\subsection{Fixed-Point Viewpoint and Stopping Criterion}
-\label{sec:fixed_point}
-
-Define the mapping
-\begin{equation}
-\mathcal{F}(\beta)
-=
-\arg\min_{\beta'\ge0}
-\sum_{i\in\mathcal{I}}
-\rho_\delta\!\left(
-N_i\beta'_0
-+
-N_i\bar p^{\mathrm{pf}}_i(\beta)\beta'_1
-+
-N_i\bar p^{\mathrm{dec}}_i(\beta)\beta'_2
--
-T_i
-\right).
-\end{equation}
-The algorithm iterates $\beta^{(r+1)}=\mathcal{F}(\beta^{(r)})$.
-
-We terminate when
-\[
-\frac{\|\beta^{(r+1)}-\beta^{(r)}\|_2}{\|\beta^{(r)}\|_2} \le \tau
-\]
-or after a fixed iteration budget.
+To mitigate outliers, we optionally replace the squared loss with a Huber loss
+$\rho_\delta$.
+The resulting mapping defines a fixed-point iteration
+$\beta^{(r+1)}=\mathcal{F}(\beta^{(r)})$, terminated by relative change or a
+fixed iteration budget.
 
 % ============================================================
 \subsection{Limitations and Scope}
 \label{sec:limitations}
 
-This approach assumes a single sequential busy-loop and relies on accurate
-knowledge of engine scheduling rules.
-Uniform redistribution of the final prefill chunk smooths localized effects,
-and identifiability requires sufficient variation in token pressures.
+This approach assumes a single sequential busy-loop and accurate knowledge of
+engine scheduling rules.
+Partial-chunk corrections remain approximate due to unobserved step
+boundaries.
+Identifiability requires sufficient variation in token pressures.
 Despite these limitations, the method provides a practical and non-intrusive
 path to step-level calibration using only production traces.
 
 \paragraph{Simulator linkage.}
 The estimated coefficients $\beta^\star$ are used directly in the step-time
-model (Eq.~\ref{eq:step_model}) of the discrete-event simulator described in
-Section~\ref{sec:simulator_design}.
+model (Eq.~\ref{eq:step_model}) of the discrete-event simulator.
 
 
 % ============================================================
@@ -1135,7 +1109,10 @@ Simple heuristics include:
 \end{itemize}
 
 These criteria are evaluated using trace-derived features only and do not
-require knowledge of the true execution coefficients.
+require knowledge of the true execution coefficients. These criteria 
+depend only on aggregate variation in step-level feature magnitudes and 
+are insensitive to the specific treatment of partial prefill
+chunks, which affects only localized mass attribution within phases.
 
 \paragraph{Separation of Concerns.}
 Workload generators and benchmarking frameworks are used solely to induce
@@ -1160,6 +1137,29 @@ and interpretability while preserving its central property: step-level
 execution coefficients are inferred using only trace-visible information,
 without engine instrumentation or per-step timing.
 
+\begin{table}[t]
+\centering
+\caption{Summary of key symbols used in step-level coefficient estimation.}
+\label{tab:symbol_glossary}
+\begin{tabular}{lll}
+\toprule
+Symbol & Description & Units \\
+\midrule
+$\beta_0$ & Per-step fixed overhead & seconds / step \\
+$\beta_1$ & Prefill token cost & seconds / token \\
+$\beta_2$ & Decode token cost & seconds / token \\
+$T_i$ & Observed phase duration & seconds \\
+$N_i$ & Trace-inferred step count & steps \\
+$p^{\mathrm{pf}}(t)$ & Prefill token pressure & tokens / step \\
+$p^{\mathrm{dec}}(t)$ & Decode token pressure & tokens / step \\
+$C$ & Prefill chunk size & tokens \\
+$\rho_r$ & Tokens in final prefill chunk & tokens \\
+$\Delta_r$ & Missing prefill chunk mass & tokens \\
+$\Delta(t;\beta)$ & Local step duration model & seconds / step \\
+$\lambda(t;\beta)$ & Step density & steps / second \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 
 \section{Evaluation}
