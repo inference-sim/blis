@@ -787,7 +787,10 @@ For each phase instance $i$, the trace provides:
   \item start time $t_{i,s}$ and end time $t_{i,e}$,
   \item observed duration $T_i = t_{i,e}-t_{i,s}$,
   \item a trace-inferred step count $N_i \in \mathbb{N}$, deterministically
-        derived from trace-visible token counts and known engine scheduling rules,
+        derived from trace-visible token counts and known engine scheduling rules.
+        For a decode phase, $N_i$ equals the number of decode tokens (one token per step). 
+        For a prefill phase under chunk size $C$, a standard trace-inferred 
+        choice is $N_i = \lceil P_i / C \rceil$.
   \item aggregate token counts for the phase.
 \end{itemize}
 
@@ -833,7 +836,7 @@ prefill step processes
 \end{equation}
 The missing token mass relative to a full chunk is
 \[
-\Delta_r = C - \rho_r \in [0,C).
+\mu_r = C - \rho_r \in [0,C).
 \]
 
 \paragraph{Naive full-chunk pressure.}
@@ -847,29 +850,40 @@ C \sum_r a_r(t).
 \end{equation}
 
 \paragraph{End-localized partial-chunk correction.}
-The missing mass $\Delta_r$ should be subtracted from the prefill pressure
+The missing mass $\mu_r$ should be subtracted from the prefill pressure
 near the end of request $r$’s prefill phase.
 Because traces do not expose global step boundaries, we localize this
 correction in time using a weighting function.
 
-Let $t_{r,\mathrm{pf\mbox{-}end}}$ denote the trace-visible end time of request
+Let $t_{r,\mathrm{pf\text{-}\mathrm{end}}}$ denote the trace-visible end time of request
 $r$’s prefill phase.
 Define a nonnegative correction weight $w_r(t)$ supported near
-$t_{r,\mathrm{pf\mbox{-}end}}$ and normalized such that
+$t_{r,\mathrm{pf\text{-}\mathrm{end}}}$ and normalized such that
 \[
 \int w_r(t)\,dt = 1.
 \]
+
 The refined effective prefill pressure is
 \begin{equation}
 \tilde p^{\mathrm{pf}}(t)
 =
 p^{\mathrm{pf}}_{\mathrm{full}}(t)
 -
-\sum_r \Delta_r\, w_r(t).
+\sum_r \mu_r\, w_r(t).
 \label{eq:refined_prefill_pressure}
 \end{equation}
 This construction preserves total prefill token mass exactly while
 localizing the partial-chunk correction near the end of prefill.
+
+\paragraph{Interpretation of the correction weight.}
+Although $w_r(t)$ is normalized in wall-clock time, it is interpreted as a
+\emph{step-time attribution density}: $w_r(t)$ is chosen proportional to the
+local step density so that $\mu_r w_r(t)$ represents missing prefill mass
+expressed in units of tokens per step.
+Under this interpretation, $\tilde p^{\mathrm{pf}}(t)$ in
+Eq.~\eqref{eq:refined_prefill_pressure} remains a well-defined token pressure
+(tokens/step), consistent with the step-level execution model.
+
 
 \paragraph{Uniform redistribution as a special case.}
 If $w_r(t)$ is chosen uniform over the prefill interval of request $r$, then
@@ -877,32 +891,64 @@ Eq.~\eqref{eq:refined_prefill_pressure} reduces to uniform redistribution of
 $\rho_r/C$ across the prefill segment.
 This simple choice avoids boundary assumptions but smooths localized effects.
 
+\paragraph{Baseline usage of the correction.}
+In the baseline estimator, $\tilde p^{\mathrm{pf}}(t)$ is used only through
+time integrals of the form $\int \tilde p^{\mathrm{pf}}(t)\,dt$.
+Under uniform $w_r(t)$, this subtracts exactly $\mu_r$ tokens per request from
+the integrated prefill exposure, independent of step localization.
+Pointwise interpretation of $\tilde p^{\mathrm{pf}}(t)$ is therefore not
+required in the baseline.
+
 \paragraph{Step-density--weighted localization.}
 In the iterative estimator introduced below, we choose $w_r(t)$ proportional
 to the estimated step density, restricted to a short trailing window before
-$t_{r,\mathrm{pf\mbox{-}end}}$.
+$t_{r,\mathrm{pf\text{-}\mathrm{end}}}$.
 This places the correction in \emph{step coordinates} rather than arbitrary
 wall time, improving alignment with the underlying execution model.
 
-% ============================================================
 \subsection{Baseline: Time-Integrated NNLS Estimation}
 \label{sec:baseline}
 
 We first present a simple, trace-only baseline estimator that fits phase
 durations using time-integrated pressures.
+Because pressures are expressed in \emph{tokens per step}, a time integral
+$\int p(t)\,dt$ has units $(\text{tokens}/\text{step})\cdot \text{seconds}$.
+To form regression features with units of \emph{tokens}---so that
+$\beta_1,\beta_2$ retain the interpretation ``seconds per token''---we
+convert time integrals into approximate \emph{step integrals} using a
+phase-local constant step density.
 
-\paragraph{Integrated pressures.}
-For phase instance $i$, define
+\paragraph{Phase-local step density.}
+For phase instance $i$, let $T_i=t_{i,e}-t_{i,s}$ be its observed duration and
+let $N_i\in\mathbb{N}$ be the trace-inferred step count.
+We define the (phase-local) step density proxy
 \begin{equation}
-A^{\mathrm{pf}}_i
-=
-\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt,
+\widehat\lambda_i \;=\; \frac{N_i}{T_i},
 \qquad
-A^{\mathrm{dec}}_i
-=
-\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt.
-\label{eq:integrated_pressures}
+\text{units: steps/second}.
+\label{eq:baseline_lambda_hat}
 \end{equation}
+This assumes steps are spread approximately uniformly over the phase window,
+and is used \emph{only} to convert time integrals into step-aggregated token
+totals in the baseline.
+
+\paragraph{Integrated token exposures (baseline features).}
+We define baseline integrated exposures
+\begin{align}
+A^{\mathrm{pf}}_i
+&=
+\int_{t_{i,s}}^{t_{i,e}}
+\tilde p^{\mathrm{pf}}(t)\,\widehat\lambda_i\,dt,
+&
+A^{\mathrm{dec}}_i
+&=
+\int_{t_{i,s}}^{t_{i,e}}
+p^{\mathrm{dec}}(t)\,\widehat\lambda_i\,dt,
+\label{eq:baseline_integrated_exposures}
+\end{align}
+which have units of tokens because $\tilde p^{\mathrm{pf}}(t)$ and
+$p^{\mathrm{dec}}(t)$ are in tokens/step and $\widehat\lambda_i$ is in
+steps/second.
 
 \paragraph{Baseline predictor.}
 The baseline predicts phase duration as
@@ -913,9 +959,12 @@ The baseline predicts phase duration as
 +
 \beta_1\,A^{\mathrm{pf}}_i
 +
-\beta_2\,A^{\mathrm{dec}}_i.
+\beta_2\,A^{\mathrm{dec}}_i,
 \label{eq:baseline_predictor}
 \end{equation}
+where $\beta_0$ has units seconds/step and $\beta_1,\beta_2$ have units
+seconds/token, consistent with the step-level model in
+Eq.~\eqref{eq:step_model}.
 
 \paragraph{NNLS estimation.}
 Given a set of phase instances $\mathcal{I}$, we estimate $\beta$ via
@@ -929,10 +978,15 @@ non-negative least squares:
 \label{eq:baseline_nnls}
 \end{equation}
 
-\paragraph{Limitation.}
-This estimator fits wall-clock--weighted behavior.
-Periods with long steps exert disproportionate influence, and the estimator
-converges to time-averaged rather than step-averaged execution costs.
+\paragraph{Limitation of the baseline.}
+This estimator remains wall-clock--weighted because $A_i^{\mathrm{pf}}$ and
+$A_i^{\mathrm{dec}}$ are formed by integrating over time within each phase,
+using the phase-average step density proxy $\widehat\lambda_i$ rather than a
+time-varying step density.
+As a result, phases that coincide with long-step periods can exert
+disproportionate influence, motivating the step-density--reweighted estimator
+in Section~\ref{sec:step_density}.
+
 
 % ============================================================
 \subsection{Step-Density Reweighted Estimation}
@@ -980,8 +1034,9 @@ q_i(t;\beta)
 \frac{\lambda(t;\beta)}{\Lambda_i(\beta)}.
 \]
 By construction, $\int q_i(t;\beta)\,dt = 1$.
-The trace-inferred step count $N_i$ is treated as fixed; $q_i$ estimates where
-those steps occur in time.
+We treat $N_i$ as fixed and use $q_i(t;\beta)$ only as a trace-only
+\emph{step-time attribution model} within the observed phase window; 
+in other words, $q_i$ estimates where those steps occur in time.
 
 \subsubsection{Step-Averaged Pressures}
 
@@ -996,6 +1051,13 @@ Define
 \int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i(t;\beta)\,dt.
 \label{eq:step_averaged_pressures}
 \end{equation}
+
+Note that $\bar p_i^{\mathrm{pf}}(\beta)$ retains units of tokens/step, so
+$N_i\bar p_i^{\mathrm{pf}}(\beta)$ is an \emph{effective step-aggregated prefill exposure}
+for phase $i$ under the step-timing model $\lambda(t;\beta)$.
+In the special case of approximately uniform step density within the phase,
+this reduces to the baseline exposure $A_i^{\mathrm{pf}}$ (up to numerical integration error).
+
 
 \subsubsection{MM-Style Iterative NNLS}
 
@@ -1019,7 +1081,9 @@ T_i
 \end{equation}
 Optional damping
 $\beta^{(r+1)} \leftarrow (1-\eta)\beta^{(r)} + \eta\beta^{(r+1)}$
-improves numerical stability.
+improves numerical stability. 
+We iterate until $\|\beta^{(r+1)} - \beta^{(r)}\|_2 < \epsilon$ or a maximum
+iteration count is reached.
 
 % ============================================================
 \subsection{Robust Estimation and Fixed-Point View}
@@ -1154,7 +1218,7 @@ $p^{\mathrm{pf}}(t)$ & Prefill token pressure & tokens / step \\
 $p^{\mathrm{dec}}(t)$ & Decode token pressure & tokens / step \\
 $C$ & Prefill chunk size & tokens \\
 $\rho_r$ & Tokens in final prefill chunk & tokens \\
-$\Delta_r$ & Missing prefill chunk mass & tokens \\
+$\mu_r$ & Missing prefill chunk mass & tokens \\
 $\Delta(t;\beta)$ & Local step duration model & seconds / step \\
 $\lambda(t;\beta)$ & Step density & steps / second \\
 \bottomrule
