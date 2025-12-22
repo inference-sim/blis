@@ -5,6 +5,12 @@
 \usepackage{graphicx}
 \usepackage{amsmath, amssymb}
 \usepackage{bm}
+\usepackage[most]{tcolorbox}
+\usepackage{tabularx}
+\usepackage{pifont} % optional for symbols
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage{xcolor}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{hyperref}
@@ -15,6 +21,7 @@
 \setlength{\LTright}{0pt}  % no right indent for longtable
 \newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
 \newcolumntype{L}[1]{>{\raggedright\let\newline\\\arraybackslash\hspace{0pt}}p{#1}}
+
 
 % --- Theorems, lemmas, claims, proofs ---
 \usepackage{amsthm}
@@ -45,6 +52,14 @@
 % \begin{proof} ... \end{proof}
 % Customize QED symbol if you like:
 \renewcommand{\qedsymbol}{$\blacksquare$}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\definecolor{prefillcolor}{RGB}{173,216,230}  % Light blue
+\definecolor{decodecolor}{RGB}{144,238,144}   % Light green
+\definecolor{gridcolor}{RGB}{200,200,200}     % Light gray
+\definecolor{highlightcolor}{RGB}{255,182,193} % Light pink for integration region
+
 
 % (Optional) If you want equations numbered by section (since you already use amsmath):
 \numberwithin{equation}{section}
@@ -1263,5 +1278,115 @@ Our current approach has several important limitations:
 \nocite{*}
 \bibliographystyle{plain}
 \bibliography{blis}
+
+\appendix 
+
+\section{Theory-to-Code Mapping for Baseline Estimation}
+\label{sec:baseline_theory_to_code}
+
+We infer per-step execution costs by reconstructing how much prefill and decode
+work overlaps in time during each phase, correcting for prefill chunking,
+converting wall-clock exposure into step-level token exposure, and fitting a
+nonnegative linear regression using only trace-visible information.
+
+\paragraph{Key ideas and implementation mapping.}
+The baseline estimator follows six conceptual steps, each of which maps directly
+to a small, well-defined portion of the reference implementation.
+
+\begin{enumerate}
+  \item \textbf{Estimate step-level costs from phase-level traces.} \\
+  The goal is to estimate coefficients $(\beta_0,\beta_1,\beta_2)$ in the
+  step-time model
+  \[
+  \Delta t
+  =
+  \beta_0
+  +
+  \beta_1\,(\text{prefill tokens})
+  +
+  \beta_2\,(\text{decode tokens}),
+  \]
+  even though production traces expose only phase start/end times and token
+  counts, not step boundaries. Each trace phase contributes one regression
+  equation relating its observed duration to its inferred step-level workload. \\
+  \emph{Code mapping:} function \texttt{estimate\_betas\_baseline}, regression
+  construction in Section~7 of the implementation.
+
+  \item \textbf{Reconstruct system load via overlap-based token pressures.} \\
+  At any moment in time, each active prefill request contributes approximately
+  $C$ tokens per step, and each active decode request contributes approximately
+  one token per step. When phases overlap in time, their contributions add. This
+  yields time-varying token pressure signals for prefill and decode, expressed in
+  units of tokens per step. \\
+  \emph{Code mapping:} global time grid construction from phase boundaries, and
+  pressure arrays \texttt{p\_pf\_full} and \texttt{p\_dec}.
+
+  \item \textbf{Convert wall-clock integrals into step-level exposure.} \\
+  Because pressures are measured in tokens per step but traces are measured in
+  seconds, we introduce a phase-local step-density proxy
+  $\widehat{\lambda}_i = N_i / T_i$ (steps per second), where $N_i$ is the
+  trace-inferred step count and $T_i$ is the observed phase duration. Multiplying
+  time integrals of pressure by $\widehat{\lambda}_i$ converts them into total
+  token exposure. \\
+  \emph{Code mapping:} computation of \texttt{lambda\_hat} and use of
+  \texttt{integrate\_piecewise\_constant} to form $A_i^{\mathrm{pf}}$ and
+  $A_i^{\mathrm{dec}}$.
+
+  \item \textbf{Correct systematic bias from partial prefill chunks.} \\
+  Prefill executes in chunks of size $C$ tokens per step, except for the final
+  prefill step of a request, which may be smaller. Treating all prefill steps as
+  full chunks overcounts work. For each request, we compute the missing token
+  mass in the final chunk and subtract it from the integrated prefill exposure,
+  redistributing it uniformly over the request's prefill interval. \\
+  \emph{Code mapping:} computation of $\rho_r$ and $\mu_r$ for each prefill
+  request and integrated correction applied when forming $A_i^{\mathrm{pf}}$.
+
+  \item \textbf{Reduce each phase to a single linear regression row.} \\
+  After computing step count and integrated token exposures, each phase instance
+  yields one equation of the form
+  \[
+  T_i
+  =
+  \beta_0 N_i
+  +
+  \beta_1 A_i^{\mathrm{pf}}
+  +
+  \beta_2 A_i^{\mathrm{dec}},
+  \]
+  where all quantities on the right-hand side are derived from traces. Stacking
+  all phases produces a linear system. \\
+  \emph{Code mapping:} construction of the design matrix
+  \texttt{X = [N\_i, A\_pf\_i, A\_dec\_i]} and target vector \texttt{y = T\_i}.
+
+  \item \textbf{Solve a nonnegative least-squares problem to obtain simulator-ready coefficients.} \\
+  The coefficients are estimated by solving a nonnegative least-squares problem,
+  enforcing physical constraints that costs cannot be negative. The resulting
+  coefficients can be used directly in the simulator's step-time model without
+  further calibration. \\
+  \emph{Code mapping:} \texttt{LinearRegression(fit\_intercept=False,
+  positive=True)} and return of \texttt{BaselineBetaResult}.
+\end{enumerate}
+
+\paragraph{Summary.}
+The baseline estimator is deliberately simple: it uses only phase-level timing
+and token counts, reconstructs overlapping workload via deterministic rules,
+applies a minimal bias correction for prefill chunking, and fits a convex
+regression problem. This simplicity makes it robust, trace-only, and easy to
+audit, while providing step-level coefficients suitable for discrete-event
+simulation.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figs/overlap_phases.pdf}
+  \caption{\textbf{Overlapping phase intervals and trace-derived quantities.}
+  Each horizontal bar represents a trace-visible phase (prefill or decode) 
+  of a request plotted on a shared time axis. Vertical dashed 
+  lines mark the phase start and end times. The numbers in 
+  parentheses indicate the trace-inferred number of busy-loop steps 
+  executed during each phase (e.g., decode steps equal output tokens; 
+  prefill steps equal chunked prefill iterations).}
+  \label{fig:overlap_phases}
+\end{figure}
+
 
 \end{document}
