@@ -945,7 +945,10 @@ We define the (phase-local) step density proxy
 \end{equation}
 This assumes steps are spread approximately uniformly over the phase window,
 and is used \emph{only} to convert time integrals into step-aggregated token
-totals in the baseline.
+totals in the baseline.\footnote{Implementation detail: to avoid extreme $\widehat{\lambda}_i$ when $T_i$
+is very small, we may compute $\widehat{\lambda}_i = N_i/\max\{T_i, T_{\min}\}$ for a
+small $T_{\min}\ge 0$. The default $T_{\min}=0$ recovers Eq.~\eqref{eq:baseline_lambda_hat}.}
+
 
 \paragraph{Integrated token exposures (baseline features).}
 We define baseline integrated exposures

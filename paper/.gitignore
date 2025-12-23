@@ -1,0 +1,34 @@
+# ===============================
+# LaTeX build artifacts
+# ===============================
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.nav
+*.snm
+*.vrb
+*.dvi
+
+# ===============================
+# PDF output (optional)
+# ===============================
+# Comment this out if you WANT to commit the compiled PDF
+blis.pdf
+
+# ===============================
+# Fonts / misc
+# ===============================
+missfont.log
+
+# ===============================
+# Editor junk
+# ===============================
+.DS_Store

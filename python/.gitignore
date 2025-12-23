@@ -1,41 +1,31 @@
 # ===============================
-# OS / Editor junk
-# ===============================
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-Thumbs.db
-
-# ===============================
-# Editor / IDE
-# ===============================
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# ===============================
-# Python general
+# Python cache / build
 # ===============================
 __pycache__/
 *.py[cod]
 *.pyo
-*.egg-info/
-.eggs/
-.env
-.venv
+
+# ===============================
+# Virtual environments
+# ===============================
+.venv/
 venv/
+env/
 
 # ===============================
-# Logs / temp
+# Test / coverage artifacts
 # ===============================
-*.log
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ===============================
+# OS junk
+# ===============================
+.DS_Store
+
+# ===============================
+# Ignore local scratch files
+# ===============================
 *.tmp
-
-# ===============================
-# Data (optional, safe default)
-# ===============================
-data/
+*.bak
