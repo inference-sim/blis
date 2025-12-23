@@ -28,8 +28,8 @@ def _minimal_valid_trace() -> pd.DataFrame:
     """
     return pd.DataFrame(
         [
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 1.0, "prompt_tokens": 64, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 1.0, "t_end": 2.0, "prompt_tokens": 0,  "decode_tokens": 1},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 1.0, "prefill_tokens": 64, "decode_tokens": 0},
+            {"request_id": "A", "phase_type": "decode",  "t_start": 1.0, "t_end": 2.0, "prefill_tokens": 0,  "decode_tokens": 1},
         ]
     )
 
@@ -71,9 +71,9 @@ def test_rejects_multiple_prefill_rows_per_request() -> None:
     """
     df = pd.DataFrame(
         [
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 1.0, "prompt_tokens": 64, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "prefill", "t_start": 1.0, "t_end": 2.0, "prompt_tokens": 64, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 3.0, "prompt_tokens": 0,  "decode_tokens": 1},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 1.0, "prefill_tokens": 64, "decode_tokens": 0},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 1.0, "t_end": 2.0, "prefill_tokens": 64, "decode_tokens": 0},
+            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 3.0, "prefill_tokens": 0,  "decode_tokens": 1},
         ]
     )
 
@@ -93,15 +93,15 @@ def test_rejects_non_positive_chunk_size() -> None:
 
 def test_accepts_authoritative_n_steps_col_without_token_columns() -> None:
     """
-    If N_steps is provided, the estimator should not require prompt_tokens/decode_tokens.
-    (It still needs prompt_tokens for uniform correction, but ONLY for prefill rows.)
+    If N_steps is provided, the estimator should not require prefill_tokens/decode_tokens.
+    (It still needs prefill_tokens for uniform correction, but ONLY for prefill rows.)
 
-    Here we provide N_steps and prompt_tokens, but omit decode_tokens.
+    Here we provide N_steps and prefill_tokens, but omit decode_tokens.
     """
     df = pd.DataFrame(
         [
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 1.0, "prompt_tokens": 64, "N_steps": 1},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 1.0, "t_end": 2.0, "prompt_tokens": 0,  "N_steps": 1},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 1.0, "prefill_tokens": 64, "N_steps": 1},
+            {"request_id": "A", "phase_type": "decode",  "t_start": 1.0, "t_end": 2.0, "prefill_tokens": 0,  "N_steps": 1},
         ]
     )
 

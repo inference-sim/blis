@@ -35,17 +35,17 @@ def test_estimate_betas_baseline_smoke_two_requests() -> None:
       - time grid construction
       - sweep-line overlap counts
       - pressure integration
-      - uniform partial-chunk correction (mu may be > 0 depending on prompt_tokens)
+      - uniform partial-chunk correction (mu may be > 0 depending on prefill_tokens)
       - NNLS fit
     """
     phases = pd.DataFrame(
         [
             # Request A
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 2.0, "prompt_tokens": 96, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 6.0, "prompt_tokens": 0,  "decode_tokens": 4},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 2.0, "prefill_tokens": 96, "decode_tokens": 0},
+            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 6.0, "prefill_tokens": 0,  "decode_tokens": 4},
             # Request B
-            {"request_id": "B", "phase_type": "prefill", "t_start": 1.0, "t_end": 3.0, "prompt_tokens": 64, "decode_tokens": 0},
-            {"request_id": "B", "phase_type": "decode",  "t_start": 3.0, "t_end": 5.0, "prompt_tokens": 0,  "decode_tokens": 2},
+            {"request_id": "B", "phase_type": "prefill", "t_start": 1.0, "t_end": 3.0, "prefill_tokens": 64, "decode_tokens": 0},
+            {"request_id": "B", "phase_type": "decode",  "t_start": 3.0, "t_end": 5.0, "prefill_tokens": 0,  "decode_tokens": 2},
         ]
     )
 
@@ -97,8 +97,8 @@ def test_estimate_betas_baseline_respects_min_duration_clamp() -> None:
     """
     phases = pd.DataFrame(
         [
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0,     "t_end": 0.001, "prompt_tokens": 64, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 0.001,   "t_end": 1.001, "prompt_tokens": 0,  "decode_tokens": 1},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0,     "t_end": 0.001, "prefill_tokens": 64, "decode_tokens": 0},
+            {"request_id": "A", "phase_type": "decode",  "t_start": 0.001,   "t_end": 1.001, "prefill_tokens": 0,  "decode_tokens": 1},
         ]
     )
 

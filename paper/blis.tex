@@ -770,7 +770,7 @@ concurrently active requests.
 Steps are assumed to execute sequentially.
 
 Let $k$ index busy-loop steps.
-We model the wall-clock duration of step $k$ as
+We model the duration of step $k$ as
 \begin{equation}
 \Delta t_k
 =
@@ -794,34 +794,86 @@ simulator. Accurate simulation therefore requires identifying the
 coefficient vector $\beta=(\beta_0,\beta_1,\beta_2)$.
 
 \paragraph{What traces provide.}
-Production traces do not expose step boundaries or per-step token counts.
-Instead, they provide \emph{phase instances} indexed by $i$, each
-corresponding to either a prefill phase or a decode phase of a single request.
+Production inference traces do not expose step boundaries or per-step execution
+timings. Instead, they provide a sequence of \emph{phase instances}, indexed by
+$i$, each corresponding to either the prefill phase or the decode phase of a
+single request.
+
 For each phase instance $i$, the trace provides:
 \begin{itemize}
-  \item start time $t_{i,s}$ and end time $t_{i,e}$,
-  \item observed duration $T_i = t_{i,e}-t_{i,s}$,
-  \item a trace-inferred step count $N_i \in \mathbb{N}$, deterministically
-        derived from trace-visible token counts and known engine scheduling rules.
-        For a decode phase, $N_i$ equals the number of decode tokens (one token per step). 
-        For a prefill phase under chunk size $C$, a standard trace-inferred 
-        choice is $N_i = \lceil P_i / C \rceil$.
-  \item aggregate token counts for the phase.
+  \item the phase type (\textit{prefill} or \textit{decode}),
+  \item a start time $t_{i,s}$ and end time $t_{i,e}$,
+  \item an observed phase duration $T_i = t_{i,e} - t_{i,s}$,
+  \item aggregate token counts associated with the phase, including the number
+        of \emph{prefill tokens} or \emph{decode tokens}.
 \end{itemize}
 
-The estimation problem is therefore:
-\emph{given only phase-level summaries, estimate the step-level coefficients
-$\beta$ in Eq.~\eqref{eq:step_model}.}
+From this information, we derive a step count $N_i \in \mathbb{N}$.
+For a decode phase, execution proceeds one token per step, and hence
+$N_i$ equals the number of decode tokens.
+For a prefill phase, execution is chunked: under a prefill chunk size $C$,
+a standard trace-inferred choice is
+$N_i = \lceil P_i / C \rceil$,
+where $P_i$ denotes the number of prefill tokens that induce computation.\footnote{
+Prefix-cached tokens do not contribute to execution steps and are therefore
+excluded from $P_i$. This treatment is consistent with the execution semantics
+of vLLM-style inference engines~\cite{vllm}.
+}
 
 % ============================================================
 \subsection{Trace-Derived Token Pressures}
 \label{sec:pressures}
 
-To relate phase-level observations to step-level execution, we reconstruct
-time-varying \emph{token pressures} from trace-visible request overlap.
+\paragraph{Intuition.}
+Inference executes as a sequence of discrete steps, but production traces expose
+only coarse, phase-level summaries.
+For each prefill or decode phase of a request, the trace records when the phase
+starts and ends and how many tokens are processed, but not how those tokens are
+distributed across individual steps.
+The goal is not to reconstruct the hidden step schedule, but to recover
+step-level execution coefficients that describe how different types of work
+contribute to elapsed time when execution is aggregated over many steps.
 
-\paragraph{Token pressures.}
-Let
+The baseline estimator bridges this gap by compressing step-level behavior into
+phase-level quantities that are consistent with the trace.
+It treats each phase as a superposition of many unobserved steps and represents
+the effective step-level workload of each type using token pressures.
+These pressures describe, as a function of time, how much prefill and decode
+work is being processed per execution step across all concurrently active
+requests, without requiring access to step boundaries or per-step timings.
+This intuition is illustrated in Figure \ref{fig:overlap_phases}.
+
+\begin{figure}[ht!]
+  \centering
+  \includegraphics[width=\linewidth]{figs/overlap_phases.pdf}
+  \caption{\textbf{Phase overlap and inferred workload over wall-clock time.}
+Each horizontal bar represents a trace-visible prefill or decode phase 
+of a request, while dashed vertical lines indicate wall-clock time 
+instants at which an execution step boundary may occur. 
+The dashed line at time $t = 8.0$ falls at the end of a step during 
+which all requests are concurrently active, so both prefill and decode 
+pressures are at their maximum for that step. Although traces 
+expose only phase start and end times—not step boundaries—the 
+degree of phase overlap determines how much work is executed per 
+step when time is aggregated. The baseline estimator leverages this 
+intuition by converting overlap in wall-clock time into integrated 
+token exposures that are consistent with the underlying step-level 
+execution model.}
+\label{fig:overlap_phases}
+\end{figure}
+
+Given these pressures and the trace-inferred number of steps per phase, the
+baseline constructs simple phase-level summaries—used as regression
+features—that quantify how much prefill and decode work each phase “exposes” to
+the underlying step model.
+Each phase duration can then be written as a linear function of these summaries
+and the unknown step-level coefficients, turning coefficient recovery into an
+ordinary regression problem.
+Solving this regression produces a single, globally consistent set of execution
+coefficients from trace-only data and provides the starting point for the
+step-density–reweighted refinements introduced next.
+
+\paragraph{Token pressures.} Let
 \begin{itemize}
   \item $p^{\mathrm{pf}}(t)$ denote the total number of prefill tokens
         processed \emph{per step} at time $t$,
@@ -833,8 +885,7 @@ request overlap, known per-request token counts, and the engine’s
 scheduling semantics.
 They are expressed in units of tokens per step (not tokens per unit time).
 
-% ============================================================
-\subsection{Prefill Chunking and Partial-Chunk Correction}
+\subsubsection{Prefill Chunking and Partial-Chunk Correction}
 \label{sec:prefill_correction}
 
 Decode contributes exactly one token per active request per step.
@@ -842,7 +893,7 @@ Prefill, however, proceeds in chunks of size $C$ tokens per step, except for
 the final prefill step of a request, which may process fewer than $C$ tokens.
 Naively treating all prefill steps as full chunks introduces systematic bias.
 
-For a request $r$ with prompt length $P_r$ and $N_r$ prefill steps, the final
+For a request $r$ with $P_r$ prefill tokens and $N_r$ prefill steps, the final
 prefill step processes
 \begin{equation}
 \rho_r = P_r - C\,(N_r-1),
@@ -906,20 +957,19 @@ Eq.~\eqref{eq:refined_prefill_pressure} reduces to uniform redistribution of
 $\rho_r/C$ across the prefill segment.
 This simple choice avoids boundary assumptions but smooths localized effects.
 
-\paragraph{Baseline usage of the correction.}
-In the baseline estimator, $\tilde p^{\mathrm{pf}}(t)$ is used only through
-time integrals of the form $\int \tilde p^{\mathrm{pf}}(t)\,dt$.
-Under uniform $w_r(t)$, this subtracts exactly $\mu_r$ tokens per request from
-the integrated prefill exposure, independent of step localization.
-Pointwise interpretation of $\tilde p^{\mathrm{pf}}(t)$ is therefore not
-required in the baseline.
+\paragraph{Implementation note (no pointwise reconstruction required).}
+Although we define token pressures $p^{\mathrm{pf}}(t)$, $p^{\mathrm{dec}}(t)$ and
+the partial-chunk correction weights $w_r(t)$ as functions of wall-clock time,
+the baseline estimator never requires evaluating them instant by instant.
+It uses these objects only through time integrals over phase intervals, e.g.,
+$\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt$ and
+$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt$.
+In practice, these integrals can be computed exactly from the trace by sweeping
+over the sorted phase-boundary events and accumulating piecewise-constant
+overlap counts (and, for prefill, applying a per-request partial-chunk
+adjustment whose placement is irrelevant in the baseline as long as its total
+mass is preserved).
 
-\paragraph{Step-density--weighted localization.}
-In the iterative estimator introduced below, we choose $w_r(t)$ proportional
-to the estimated step density, restricted to a short trailing window before
-$t_{r,\mathrm{pf\text{-}\mathrm{end}}}$.
-This places the correction in \emph{step coordinates} rather than arbitrary
-wall time, improving alignment with the underlying execution model.
 
 \subsection{Baseline: Time-Integrated NNLS Estimation}
 \label{sec:baseline}
@@ -1000,6 +1050,65 @@ We emphasize that the simulator generates its own step-level token counts
 and KV-cache dynamics; the only information learned from traces is the 
 estimated $\beta$, which parameterizes the simulator but does not 
 encode any trace-specific timing information.
+
+The pseudocode for the baseline estimation procedure is in 
+Algorithm \ref{alg:baseline}.
+
+\begin{algorithm}[t]
+\caption{Baseline algorithm for trace-only estimation}
+\label{alg:baseline}
+\begin{algorithmic}[1]
+\Require Instances $\{(\text{request id }r_i,\ \text{type }\tau_i\in\{\textsf{prefill},\textsf{decode}\},\ t_{i,s},t_{i,e},\ P_i,D_i)\}_{i=1}^n$, chunk size $C$.
+\Ensure $\hat\beta=(\hat\beta_0,\hat\beta_1,\hat\beta_2)\in\mathbb{R}^3_{\ge 0}$.
+\State \textbf{Infer step counts.} $N_i\gets \lceil P_i/C\rceil$ if $\tau_i=\textsf{prefill}$; else $N_i\gets D_i$.
+\State \textbf{Durations and step density.} $T_i\gets t_{i,e}-t_{i,s}$; $\widehat\lambda_i\gets N_i/T_i$.
+\State \textbf{Global time grid.} $\mathcal{G}=\{g_0<\dots<g_M\}\gets\mathrm{sort}\big(\{t_{i,s}\}_i\cup\{t_{i,e}\}_i\big)$; segments are $[g_j,g_{j+1})$.
+\State \textbf{Piecewise-constant signals on segments.} For each segment $j=0,\dots,M-1$:
+\[
+\begin{aligned}
+p^{\mathrm{pf}}_{\mathrm{full},j}
+&\gets C \cdot \bigl(\#\text{ requests prefilling during }[g_j,g_{j+1})\bigr),\\
+p^{\mathrm{dec}}_{j}
+&\gets \bigl(\#\text{ requests decoding during }[g_j,g_{j+1})\bigr).
+\end{aligned}
+\]
+\State \textbf{Prefill correction (uniform redistribution).}
+\For{each request $r$}
+  \State Let $i$ denote the (unique) \textsf{prefill} phase instance of request $r$.
+  \State Set missing mass $\mu_r \gets C N_i - P_i$ and uniform rate
+  $\nu_r \gets \mu_r/(t_{i,e}-t_{i,s})$ \quad (tokens/sec).
+\EndFor
+\State For each segment $[g_j,g_{j+1})$, set the aggregate correction rate (tokens/sec)
+\[
+\begin{aligned}
+u_j \;\;&\gets \sum_r \nu_r,
+\quad \text{where the sum is over all requests $r$ whose \textsf{prefill} interval overlaps with }[g_j,g_{j+1}) .
+\end{aligned}
+\]
+\For{each phase instance $i$}
+  \State Let $\mathcal{J}(i)$ be the set of grid segments $j$ whose interval
+  $[g_j,g_{j+1})$ overlaps the phase window $[t_{i,s},t_{i,e})$.
+  \State For each $j\in\mathcal{J}(i)$, let
+  $\Delta t_{ij} \gets \bigl|\,[t_{i,s},t_{i,e})\cap[g_j,g_{j+1})\,\bigr|$.
+  \State Compute exact segment sums:
+  \[
+  \begin{aligned}
+  J^{\mathrm{pf}}_i &\gets \sum_{j\in\mathcal{J}(i)} p^{\mathrm{pf}}_{\mathrm{full},j}\,\Delta t_{ij},\\
+  J^{\mathrm{dec}}_i &\gets \sum_{j\in\mathcal{J}(i)} p^{\mathrm{dec}}_{j}\,\Delta t_{ij},\\
+  U_i &\gets \sum_{j\in\mathcal{J}(i)} u_j\,\Delta t_{ij}.
+  \end{aligned}
+  \]
+  \State Convert to token exposures:
+  $A^{\mathrm{pf}}_i\gets \widehat\lambda_i J^{\mathrm{pf}}_i-U_i$,\;
+  $A^{\mathrm{dec}}_i\gets \widehat\lambda_i J^{\mathrm{dec}}_i$.
+\EndFor
+\State \textbf{NNLS fit.}
+$\hat\beta\gets\arg\min_{\beta\ge0}\sum_i(\beta_0N_i+\beta_1A^{\mathrm{pf}}_i+\beta_2A^{\mathrm{dec}}_i-T_i)^2$.
+\State \Return $\hat\beta$.
+\end{algorithmic}
+\end{algorithm}
+
+
 
 \paragraph{Limitation of the baseline.}
 This estimator remains wall-clock--weighted because $A_i^{\mathrm{pf}}$ and
@@ -1152,7 +1261,8 @@ We construct a small set of \emph{calibration probes}, each defined by a
 controlled combination of:
 \begin{itemize}
   \item request arrival rate and burstiness,
-  \item prompt length distribution,
+  \item input length distribution,
+  \item prefix hit distribution,
   \item decode length distribution,
   \item maximum concurrency or batch limits.
 \end{itemize}
@@ -1178,7 +1288,7 @@ Calibration probes are selected to maximize diversity among these features
 across phases, reducing collinearity between prefill, decode, and step-count
 terms. In practice, this can be achieved by:
 \begin{itemize}
-  \item mixing prompt-heavy and decode-heavy workloads,
+  \item mixing prefill-heavy and decode-heavy workloads,
   \item varying concurrency independently of token lengths,
   \item introducing controlled arrival-rate ramps or bursts.
 \end{itemize}
@@ -1382,19 +1492,5 @@ applies a minimal bias correction for prefill chunking, and fits a convex
 regression problem. This simplicity makes it robust, trace-only, and easy to
 audit, while providing step-level coefficients suitable for discrete-event
 simulation.
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\linewidth]{figs/overlap_phases.pdf}
-  \caption{\textbf{Overlapping phase intervals and trace-derived quantities.}
-  Each horizontal bar represents a trace-visible phase (prefill or decode) 
-  of a request plotted on a shared time axis. Vertical dashed 
-  lines mark the phase start and end times. The numbers in 
-  parentheses indicate the trace-inferred number of busy-loop steps 
-  executed during each phase (e.g., decode steps equal output tokens; 
-  prefill steps equal chunked prefill iterations).}
-  \label{fig:overlap_phases}
-\end{figure}
-
 
 \end{document}
