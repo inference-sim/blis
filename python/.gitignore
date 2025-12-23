@@ -18,6 +18,8 @@ env/
 .coverage
 htmlcov/
 .pytest_cache/
+.hypothesis/
+
 
 # ===============================
 # OS junk

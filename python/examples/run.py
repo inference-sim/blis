@@ -1,135 +1,125 @@
 #!/usr/bin/env python3
 """
-run.py
+examples/run.py
 
-Tiny runnable demo that loads a phase-level trace CSV and runs the baseline
-time-integrated NNLS estimator to recover step-level coefficients
-(beta0, beta1, beta2).
+Tiny runnable demo: load a phase-level trace CSV and run the baseline
+time-integrated NNLS estimator to recover step-level coefficients:
+  (beta0, beta1, beta2).
 
-Why this script uses dynamic import
------------------------------------
-Your estimator file is named with dots:
-  baseline/baseline.timeintegral.py
+Key assumption
+--------------
+You are running this from the repo's `python/` directory after installing the
+package (recommended):
 
-Dotted filenames are awkward to import as standard Python modules. To avoid
-forcing any renames, this script loads that file directly via importlib and
-then calls estimate_betas_baseline().
+  python -m pip install -e .
+
+With that in place, the estimator can be imported normally as:
+  from baseline.timeintegral import estimate_betas_baseline
 
 Usage
 -----
-From the python/ directory (your current layout):
+From the `python/` directory:
 
+  python examples/run.py
   python examples/run.py --csv data/traces/sample.csv --chunk-size 64
+  python examples/run.py --csv /abs/path/to/trace.csv
 
-You can also pass an absolute or repo-relative CSV path.
+The CSV path can be absolute or relative to your current working directory.
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import sys
 from pathlib import Path
 
 import pandas as pd
 
+# Import the estimator from the installed/editable package.
+# This is the whole point of adding pyproject.toml and doing `pip install -e .`.
+from baseline.timeintegral import estimate_betas_baseline
 
-def _load_baseline_module(baseline_file: Path):
+
+def _default_csv_path() -> Path:
     """
-    Dynamically load the baseline estimator module from a file path.
+    Default trace location relative to this file, not the working directory.
 
-    NOTE (Python 3.12 / dataclasses):
-    -------------------------------
-    dataclasses may consult sys.modules[cls.__module__] during class decoration.
-    When loading via importlib, we must register the module in sys.modules
-    *before* executing it, otherwise sys.modules.get(...) returns None and
-    dataclasses can fail with:
-      AttributeError: 'NoneType' object has no attribute '__dict__'
+    Why:
+    - Reviewers often run scripts from unexpected locations.
+    - Using __file__ makes the default robust.
 
-    Inputs
-    ------
-    baseline_file : Path
-        Path to baseline/baseline.timeintegral.py
-
-    Output
-    ------
-    module : Python module object
-        Exposes estimate_betas_baseline(phases: pd.DataFrame, chunk_size: int, ...).
+    Layout assumption:
+      python/examples/run.py
+      python/data/traces/sample.csv
     """
-    if not baseline_file.exists():
-        raise FileNotFoundError(f"Baseline estimator file not found: {baseline_file}")
-
-    spec = importlib.util.spec_from_file_location("baseline_timeintegral", str(baseline_file))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load module spec from: {baseline_file}")
-
-    module = importlib.util.module_from_spec(spec)
-
-    # Critical for Python 3.12 dataclasses: register before exec_module().
-    sys.modules[spec.name] = module
-
-    spec.loader.exec_module(module)  # type: ignore[attr-defined]
-    return module
+    script_dir = Path(__file__).resolve().parent          # .../python/examples
+    python_root = script_dir.parent                       # .../python
+    return python_root / "data" / "traces" / "sample.csv"
 
 
-def _default_paths():
+def _resolve_path(p: str) -> Path:
     """
-    Compute defaults robustly, regardless of current working directory.
-
-    Assumes this script lives at: python/examples/run.py
-    and that "python/" is the working project root for the code artifact.
-
-    Returns
-    -------
-    python_root : Path
-        The python/ directory in your repo.
-    default_csv : Path
-        python/data/traces/sample.csv
-    baseline_file : Path
-        python/baseline/baseline.timeintegral.py
+    Resolve a user-provided path:
+      - expand ~
+      - if relative, interpret relative to the current working directory
+      - return an absolute Path
     """
-    script_dir = Path(__file__).resolve().parent  # .../python/examples
-    python_root = script_dir.parent               # .../python
-    default_csv = python_root / "data" / "traces" / "sample.csv"
-    baseline_file = python_root / "baseline" / "baseline.timeintegral.py"
-    return python_root, default_csv, baseline_file
+    path = Path(p).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    return path
 
 
 def main() -> int:
-    python_root, default_csv, baseline_file = _default_paths()
+    default_csv = _default_csv_path()
 
-    parser = argparse.ArgumentParser(description="Run baseline trace-only beta estimation on a CSV trace.")
-    parser.add_argument("--csv", type=str, default=str(default_csv), help="Path to phase trace CSV.")
-    parser.add_argument("--chunk-size", type=int, default=64, help="Prefill chunk size C (tokens per step).")
+    parser = argparse.ArgumentParser(
+        description="Run baseline trace-only beta estimation on a phase-level CSV trace."
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=str(default_csv),
+        help="Path to phase trace CSV (absolute or relative). Default: data/traces/sample.csv",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=64,
+        help="Prefill chunk size C (tokens per prefill step).",
+    )
     parser.add_argument(
         "--min-duration-sec",
         type=float,
         default=0.0,
-        help="Optional clamp for tiny phase durations when forming lambda_hat (default 0.0 = paper-faithful).",
+        help=(
+            "Optional clamp for tiny phase durations when forming lambda_hat. "
+            "Default 0.0 = paper-faithful (no clamp)."
+        ),
     )
     args = parser.parse_args()
 
-    csv_path = Path(args.csv).expanduser()
-    if not csv_path.is_absolute():
-        csv_path = (Path.cwd() / csv_path).resolve()
-
+    # Resolve and validate the trace path.
+    csv_path = _resolve_path(args.csv)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-    baseline = _load_baseline_module(baseline_file)
-
+    # Load the trace.
+    # Expectation: one row per phase instance (prefill or decode),
+    # with timestamps and token counts as required by estimate_betas_baseline().
     phases = pd.read_csv(csv_path)
-    res = baseline.estimate_betas_baseline(
+
+    # Run estimation.
+    res = estimate_betas_baseline(
         phases,
         chunk_size=args.chunk_size,
         min_duration_sec=args.min_duration_sec,
     )
 
+    # Print a compact, human-readable report.
     print("=== Baseline beta estimation ===")
-    print(f"Python root: {python_root}")
     print(f"CSV:         {csv_path}")
     print(f"Chunk size:  {args.chunk_size}")
-    print(f"T_min:       {args.min_duration_sec}")
+    print(f"T_min clamp: {args.min_duration_sec}")
     print()
     print("Estimated betas:")
     print(f"  beta0 (sec/step):  {res.beta0:.6f}")
@@ -139,6 +129,7 @@ def main() -> int:
     print("Diagnostics:")
     for k, v in res.diagnostics.items():
         print(f"  {k}: {v}")
+
     return 0
 
 
