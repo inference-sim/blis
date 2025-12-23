@@ -49,7 +49,7 @@ Diagnostics:
 
 ## Run the baseline with sample traces
 
-```shell
+```bash
 python examples/run.py --csv data/traces/sample.csv --chunk-size 64
 ```
 
