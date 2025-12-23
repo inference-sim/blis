@@ -47,6 +47,12 @@ Diagnostics:
   mean_A_dec_tokens: 2.625
 ```
 
+## Run the baseline with sample traces
+
+```shell
+python examples/run.py --csv data/traces/sample.csv --chunk-size 64
+```
+
 ---
 
 ## Code layout
