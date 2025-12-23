@@ -412,7 +412,7 @@ def _infer_or_read_step_counts(
     *,
     chunk_size: int,
     phase_type_col: str,
-    prompt_tokens_col: str,
+    prefill_tokens_col: str,
     decode_tokens_col: str,
     n_steps_col: str,
 ) -> pd.DataFrame:
@@ -428,13 +428,13 @@ def _infer_or_read_step_counts(
     df : pd.DataFrame, shape (n, ...)
         Must contain phase_type_col.
         If n_steps_col is missing, must also contain:
-          - prompt_tokens_col (prefill token count P_i, used only for prefill)
+          - prefill_tokens_col (prefill token count P_i, used only for prefill)
           - decode_tokens_col (decode token count, used only for decode)
     chunk_size : int
         Prefill chunk size C (tokens per prefill step), C > 0.
     phase_type_col : str
         Column name for phase type ("prefill" or "decode").
-    prompt_tokens_col : str
+    prefill_tokens_col : str
         Column name for P_i.
     decode_tokens_col : str
         Column name for decode token count.
@@ -454,14 +454,14 @@ def _infer_or_read_step_counts(
     The estimator uses N_i as a *known* regressor and as the numerator of λ̂_i = N_i/T_i.
     """
     if n_steps_col not in df.columns:
-        _require_columns(df, [prompt_tokens_col, decode_tokens_col])
+        _require_columns(df, [prefill_tokens_col, decode_tokens_col])
 
         pre = df[phase_type_col].eq("prefill")
         dec = df[phase_type_col].eq("decode")
 
         df[n_steps_col] = np.nan
 
-        P = df.loc[pre, prompt_tokens_col].astype(float).to_numpy()
+        P = df.loc[pre, prefill_tokens_col].astype(float).to_numpy()
         D = df.loc[dec, decode_tokens_col].astype(float).to_numpy()
 
         # Prefill: ceil(P/C)
@@ -674,7 +674,7 @@ def _build_uniform_partial_chunk_correction_rate(
     prefill_df: pd.DataFrame,
     t_start_col: str,
     t_end_col: str,
-    prompt_tokens_col: str,
+    prefill_tokens_col: str,
     n_steps_col: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -703,12 +703,12 @@ def _build_uniform_partial_chunk_correction_rate(
         Prefill-only subset (one row per request, enforced by caller).
         Must contain:
           - t_start_col, t_end_col
-          - prompt_tokens_col (P_r)
+          - prefill_tokens_col (P_r)
           - n_steps_col (N_r)
     t_start_col, t_end_col : str
         Column names for prefill interval boundaries.
-    prompt_tokens_col : str
-        Column name for prompt length P_r.
+    prefill_tokens_col : str
+        Column name for number of prefill tokens P_r.
     n_steps_col : str
         Column name for inferred prefill steps N_r.
 
@@ -737,11 +737,11 @@ def _build_uniform_partial_chunk_correction_rate(
         I_corr = _prefix_integral(grid, corr_rate)
         return corr_rate, I_corr
 
-    _require_columns(df, [prompt_tokens_col])
+    _require_columns(df, [prefill_tokens_col])
 
     rs = prefill_df[t_start_col].to_numpy(dtype=np.float64)
     re = prefill_df[t_end_col].to_numpy(dtype=np.float64)
-    P = prefill_df[prompt_tokens_col].astype(float).to_numpy()
+    P = prefill_df[prefill_tokens_col].astype(float).to_numpy()
     N = prefill_df[n_steps_col].astype(float).to_numpy()
 
     rho = P - float(chunk_size) * (N - 1.0)
@@ -970,7 +970,7 @@ def estimate_betas_baseline(
     phase_type_col: str = "phase_type",       # "prefill" or "decode"
     t_start_col: str = "t_start",
     t_end_col: str = "t_end",
-    prompt_tokens_col: str = "prompt_tokens", # used for prefill step count + correction
+    prefill_tokens_col: str = "prefill_tokens", # used for prefill step count + correction
     decode_tokens_col: str = "decode_tokens", # used for decode step count
     n_steps_col: str = "N_steps",             # optional; if missing, inferred
     min_duration_sec: float = 0.0,            # set >0 if you want to clamp ultra-small durations
@@ -993,7 +993,7 @@ def estimate_betas_baseline(
           - t_end_col      : phase end time t_{i,e} (seconds)
 
         If n_steps_col is NOT provided, also required:
-          - prompt_tokens_col : prompt tokens P_i (prefill only)
+          - prefill_tokens_col : number of prefill tokens P_i (prefill only)
           - decode_tokens_col : decode tokens (decode only)
 
         Optional:
@@ -1043,7 +1043,7 @@ def estimate_betas_baseline(
         df,
         chunk_size=chunk_size,
         phase_type_col=phase_type_col,
-        prompt_tokens_col=prompt_tokens_col,
+        prefill_tokens_col=prefill_tokens_col,
         decode_tokens_col=decode_tokens_col,
         n_steps_col=n_steps_col,
     )
@@ -1084,7 +1084,7 @@ def estimate_betas_baseline(
         prefill_df=prefill_df,
         t_start_col=t_start_col,
         t_end_col=t_end_col,
-        prompt_tokens_col=prompt_tokens_col,
+        prefill_tokens_col=prefill_tokens_col,
         n_steps_col=n_steps_col,
     )
 
@@ -1128,10 +1128,10 @@ def _example() -> None:
     """
     phases = pd.DataFrame(
         [
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 2.0, "prompt_tokens": 96, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 6.0, "prompt_tokens": 0,  "decode_tokens": 4},
-            {"request_id": "B", "phase_type": "prefill", "t_start": 1.0, "t_end": 3.0, "prompt_tokens": 64, "decode_tokens": 0},
-            {"request_id": "B", "phase_type": "decode",  "t_start": 3.0, "t_end": 5.0, "prompt_tokens": 0,  "decode_tokens": 2},
+            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 2.0, "prefill_tokens": 96, "decode_tokens": 0},
+            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 6.0, "prefill_tokens": 0,  "decode_tokens": 4},
+            {"request_id": "B", "phase_type": "prefill", "t_start": 1.0, "t_end": 3.0, "prefill_tokens": 64, "decode_tokens": 0},
+            {"request_id": "B", "phase_type": "decode",  "t_start": 3.0, "t_end": 5.0, "prefill_tokens": 0,  "decode_tokens": 2},
         ]
     )
 

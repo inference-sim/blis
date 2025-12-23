@@ -770,7 +770,7 @@ concurrently active requests.
 Steps are assumed to execute sequentially.
 
 Let $k$ index busy-loop steps.
-We model the wall-clock duration of step $k$ as
+We model the duration of step $k$ as
 \begin{equation}
 \Delta t_k
 =
@@ -794,24 +794,36 @@ simulator. Accurate simulation therefore requires identifying the
 coefficient vector $\beta=(\beta_0,\beta_1,\beta_2)$.
 
 \paragraph{What traces provide.}
-Production traces do not expose step boundaries or per-step token counts.
-Instead, they provide \emph{phase instances} indexed by $i$, each
-corresponding to either a prefill phase or a decode phase of a single request.
+Production inference traces do not expose step boundaries or per-step execution
+timings. Instead, they provide a sequence of \emph{phase instances}, indexed by
+$i$, each corresponding to either the prefill phase or the decode phase of a
+single request.
+
 For each phase instance $i$, the trace provides:
 \begin{itemize}
-  \item start time $t_{i,s}$ and end time $t_{i,e}$,
-  \item observed duration $T_i = t_{i,e}-t_{i,s}$,
+  \item a start time $t_{i,s}$ and end time $t_{i,e}$,
+  \item an observed phase duration $T_i = t_{i,e} - t_{i,s}$,
+  \item aggregate token counts associated with the phase, including the number
+        of \emph{prefill tokens} or \emph{decode tokens},
   \item a trace-inferred step count $N_i \in \mathbb{N}$, deterministically
-        derived from trace-visible token counts and known engine scheduling rules.
-        For a decode phase, $N_i$ equals the number of decode tokens (one token per step). 
-        For a prefill phase under chunk size $C$, a standard trace-inferred 
-        choice is $N_i = \lceil P_i / C \rceil$.
-  \item aggregate token counts for the phase.
+        derived from trace-visible token counts together with known engine
+        scheduling rules.
 \end{itemize}
 
-The estimation problem is therefore:
-\emph{given only phase-level summaries, estimate the step-level coefficients
-$\beta$ in Eq.~\eqref{eq:step_model}.}
+The step count $N_i$ is not directly observed but is inferred as follows.
+For a decode phase, execution proceeds one token per step, and hence
+$N_i$ equals the number of decode tokens.
+For a prefill phase, execution is chunked: under a prefill chunk size $C$,
+a standard trace-consistent choice is
+$N_i = \lceil P_i / C \rceil$, where $P_i$ denotes the number of prefill tokens
+that induce computation.\footnote{Prefix-cached tokens do not contribute to
+execution steps and are therefore excluded from $P_i$.}
+
+The estimation problem is therefore to infer the step-level execution
+coefficients $\beta$ in Eq.~\eqref{eq:step_model} using only phase-level
+summaries—namely, observed phase durations, aggregate token counts, and
+trace-inferred step counts—without access to per-step timings or internal
+engine instrumentation.
 
 % ============================================================
 \subsection{Trace-Derived Token Pressures}
@@ -842,7 +854,7 @@ Prefill, however, proceeds in chunks of size $C$ tokens per step, except for
 the final prefill step of a request, which may process fewer than $C$ tokens.
 Naively treating all prefill steps as full chunks introduces systematic bias.
 
-For a request $r$ with prompt length $P_r$ and $N_r$ prefill steps, the final
+For a request $r$ with $P_r$ prefill tokens and $N_r$ prefill steps, the final
 prefill step processes
 \begin{equation}
 \rho_r = P_r - C\,(N_r-1),
@@ -1152,7 +1164,8 @@ We construct a small set of \emph{calibration probes}, each defined by a
 controlled combination of:
 \begin{itemize}
   \item request arrival rate and burstiness,
-  \item prompt length distribution,
+  \item input length distribution,
+  \item prefix hit distribution,
   \item decode length distribution,
   \item maximum concurrency or batch limits.
 \end{itemize}
@@ -1178,7 +1191,7 @@ Calibration probes are selected to maximize diversity among these features
 across phases, reducing collinearity between prefill, decode, and step-count
 terms. In practice, this can be achieved by:
 \begin{itemize}
-  \item mixing prompt-heavy and decode-heavy workloads,
+  \item mixing prefill-heavy and decode-heavy workloads,
   \item varying concurrency independently of token lengths,
   \item introducing controlled arrival-rate ramps or bursts.
 \end{itemize}

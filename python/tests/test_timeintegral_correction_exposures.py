@@ -47,7 +47,7 @@ from baseline.timeintegral import (
 )
 
 
-def _prepare_single_prefill_df(*, prompt_tokens: int, t_start: float, t_end: float) -> pd.DataFrame:
+def _prepare_single_prefill_df(*, prefill_tokens: int, t_start: float, t_end: float) -> pd.DataFrame:
     """Minimal 1-row trace with a single prefill phase."""
     return pd.DataFrame(
         [
@@ -56,7 +56,7 @@ def _prepare_single_prefill_df(*, prompt_tokens: int, t_start: float, t_end: flo
                 "phase_type": "prefill",
                 "t_start": float(t_start),
                 "t_end": float(t_end),
-                "prompt_tokens": int(prompt_tokens),
+                "prefill_tokens": int(prefill_tokens),
                 # decode_tokens is unused for prefill, but required by step inference
                 "decode_tokens": 0,
             }
@@ -92,7 +92,7 @@ def _pipeline_until_exposures(phases: pd.DataFrame, *, chunk_size: int) -> tuple
         df,
         chunk_size=chunk_size,
         phase_type_col="phase_type",
-        prompt_tokens_col="prompt_tokens",
+        prefill_tokens_col="prefill_tokens",
         decode_tokens_col="decode_tokens",
         n_steps_col="N_steps",
     )
@@ -125,7 +125,7 @@ def _pipeline_until_exposures(phases: pd.DataFrame, *, chunk_size: int) -> tuple
         prefill_df=prefill_df,
         t_start_col="t_start",
         t_end_col="t_end",
-        prompt_tokens_col="prompt_tokens",
+        prefill_tokens_col="prefill_tokens",
         n_steps_col="N_steps",
     )
 
@@ -185,7 +185,7 @@ def test_uniform_partial_chunk_correction_integrates_to_mu_tokens() -> None:
     P = 96  # ceil(96/64)=2; rho=32; mu=32
     mu_expected = 32.0
 
-    phases = _prepare_single_prefill_df(prompt_tokens=P, t_start=0.0, t_end=2.0)
+    phases = _prepare_single_prefill_df(prefill_tokens=P, t_start=0.0, t_end=2.0)
     df, grid, _, _, corr_rate, _ = _pipeline_until_exposures(phases, chunk_size=C)
 
     corr_tokens = _integral_piecewise_constant(grid, corr_rate, a=0.0, b=2.0)
@@ -211,7 +211,7 @@ def test_exposure_formula_subtracts_correction_in_tokens_not_scaled_by_lambda() 
     """
     C = 64
     P = 96
-    phases = _prepare_single_prefill_df(prompt_tokens=P, t_start=0.0, t_end=2.0)
+    phases = _prepare_single_prefill_df(prefill_tokens=P, t_start=0.0, t_end=2.0)
 
     df, grid, p_pf_full, _, corr_rate, _ = _pipeline_until_exposures(phases, chunk_size=C)
 
@@ -232,14 +232,14 @@ def test_exposure_formula_subtracts_correction_in_tokens_not_scaled_by_lambda() 
     assert float(df.loc[0, "A_dec_i"]) == pytest.approx(0.0)
 
 
-def test_uniform_partial_chunk_correction_zero_when_prompt_multiple_of_chunk() -> None:
+def test_uniform_partial_chunk_correction_zero_when_prefill_multiple_of_chunk() -> None:
     """
     If P is exactly a multiple of C, then mu = 0 and correction integrates to 0.
     """
     C = 64
     P = 128  # mu=0
 
-    phases = _prepare_single_prefill_df(prompt_tokens=P, t_start=10.0, t_end=15.0)
+    phases = _prepare_single_prefill_df(prefill_tokens=P, t_start=10.0, t_end=15.0)
     df, grid, _, _, corr_rate, _ = _pipeline_until_exposures(phases, chunk_size=C)
 
     corr_tokens = _integral_piecewise_constant(grid, corr_rate, a=10.0, b=15.0)
