@@ -105,9 +105,4 @@ This reports coverage only for the baseline/ package (not examples).
 - Default settings reproduce the paper’s baseline estimator exactly.
 - Optional robustness knobs (e.g., duration clamping) are documented in code.
 - Iterative step-density reweighting will be implemented separately (future extensions).
-- Use `python -m pytest`, not `pytest`, to avoid accidentally running
-a system-installed `pytest` outside the virtual environment (common on macOS).
-- The initial test suite focuses on low-level mathematical primitives.
-End-to-end estimator tests will be added incrementally.
-- Coverage thresholds are not enforced yet; the goal is correctness first,
-then coverage hardening.
+- Use `python -m`. For instance, use `python -m pytest` and not `pytest`, to avoid accidentally running a system-installed `pytest` outside the virtual environment (common on macOS).
