@@ -1,8 +1,8 @@
 # pyright: reportOperatorIssue=false
 """
-tests/test_timeintegral_validation.py
+tests/test_baseline_validation.py
 
-Guardrail tests for schema + validation behavior of baseline/timeintegral.py.
+Guardrail tests for schema + validation behavior of estimators/baseline.py.
 
 These tests are intentionally small and fast. They protect the estimator's
 public contract: what input schemas are accepted, and what failures are raised
@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from baseline.timeintegral import estimate_betas_baseline
+from estimators.baseline import estimate_betas_baseline
 
 
 def _minimal_valid_trace() -> pd.DataFrame:

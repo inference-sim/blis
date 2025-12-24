@@ -19,10 +19,10 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Run the baseline example (self-contained smoke test)
+## Run the baseline estimator (self-contained smoke test)
 
 ```bash
-python baseline/timeintegral.py
+python estimators/baseline.py
 ```
 
 This runs a small self-contained synthetic example and prints the estimated coefficients and basic diagnostics. You should see output similar to the following.
@@ -55,8 +55,8 @@ with start/end timestamps and token counts.
 ## Code layout
 
 ```text
-baseline/
-  timeintegral.py   # baseline time-integrated NNLS estimator
+estimators/
+  baseline.py   # baseline time-integrated NNLS estimator
 ```
 
 The main entry point is:

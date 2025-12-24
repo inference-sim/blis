@@ -2,7 +2,7 @@
 # pyright: reportGeneralTypeIssues=false
 
 """
-tests/test_timeintegral_correction_exposures.py
+tests/test_correction_exposures.py
 
 Core semantics tests for the baseline estimator's exposure construction:
 
@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from baseline.timeintegral import (
+from estimators.baseline import (
     _build_global_time_grid_from_df,
     _build_uniform_partial_chunk_correction_rate,
     _check_baseline_prefill_uniqueness,

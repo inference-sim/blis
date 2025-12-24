@@ -1,5 +1,5 @@
 """
-tests/test_timeintegral_fuzz_integrals.py
+tests/test_fuzz_integrals.py
 
 Hypothesis property tests for the piecewise-constant integration primitive:
 
@@ -28,7 +28,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from baseline.timeintegral import _integral_on_interval, _prefix_integral
+from estimators.baseline import _integral_on_interval, _prefix_integral
 
 
 def _ref_integral_piecewise_constant(grid: np.ndarray, y: np.ndarray, a: float, b: float) -> float:

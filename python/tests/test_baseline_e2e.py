@@ -1,5 +1,5 @@
 """
-tests/test_timeintegral_e2e.py
+tests/test_baseline_e2e.py
 
 End-to-end + invariants + contract tests for the *public* baseline API:
 
@@ -44,7 +44,7 @@ What we intentionally *do not* assert (brittle / version-dependent)
 
 Assumptions
 -----------
-- The estimator is implemented in baseline.timeintegral.
+- The estimator is implemented in estimators.baseline.
 - The public return type is BaselineBetaResult.
 
 Run
@@ -58,7 +58,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from baseline.timeintegral import BaselineBetaResult, estimate_betas_baseline
+from estimators.baseline import BaselineBetaResult, estimate_betas_baseline
 
 
 # ---------------------------------------------------------------------------

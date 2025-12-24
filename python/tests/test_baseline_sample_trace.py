@@ -1,5 +1,5 @@
 """
-tests/test_timeintegral_sample_trace.py
+tests/test_baseline_sample_trace.py
 
 Integration/regression test: run the estimator on the checked-in sample trace.
 
@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from baseline.timeintegral import BaselineBetaResult, estimate_betas_baseline
+from estimators.baseline import BaselineBetaResult, estimate_betas_baseline
 
 
 def test_estimate_betas_on_sample_csv() -> None:
