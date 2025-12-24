@@ -22,9 +22,9 @@ From the `python/` directory:
 
   python examples/run.py
   python examples/run.py --csv data/traces/sample.csv --chunk-size 64
-  python examples/run.py --csv /abs/path/to/trace.csv
-
-The CSV path can be absolute or relative to your current working directory.
+  python examples/run.py --correction-mode end
+  python examples/run.py --correction-mode uniform
+  python examples/run.py --correction-mode none
 """
 
 from __future__ import annotations
@@ -34,18 +34,12 @@ from pathlib import Path
 
 import pandas as pd
 
-# Import the estimator from the installed/editable package.
-# This is the whole point of adding pyproject.toml and doing `pip install -e .`.
 from baseline.timeintegral import estimate_betas_baseline
 
 
 def _default_csv_path() -> Path:
     """
     Default trace location relative to this file, not the working directory.
-
-    Why:
-    - Reviewers often run scripts from unexpected locations.
-    - Using __file__ makes the default robust.
 
     Layout assumption:
       python/examples/run.py
@@ -96,6 +90,17 @@ def main() -> int:
             "Default 0.0 = paper-faithful (no clamp)."
         ),
     )
+    parser.add_argument(
+        "--correction-mode",
+        type=str,
+        default="end",
+        choices=["end", "uniform", "none"],
+        help=(
+            "Partial-chunk correction mode for prefill chunking: "
+            "'end' (default), 'uniform', or 'none'."
+        ),
+    )
+
     args = parser.parse_args()
 
     # Resolve and validate the trace path.
@@ -104,8 +109,6 @@ def main() -> int:
         raise FileNotFoundError(f"CSV not found: {csv_path}")
 
     # Load the trace.
-    # Expectation: one row per phase instance (prefill or decode),
-    # with timestamps and token counts as required by estimate_betas_baseline().
     phases = pd.read_csv(csv_path)
 
     # Run estimation.
@@ -113,13 +116,15 @@ def main() -> int:
         phases,
         chunk_size=args.chunk_size,
         min_duration_sec=args.min_duration_sec,
+        correction_mode=args.correction_mode,
     )
 
     # Print a compact, human-readable report.
     print("=== Baseline beta estimation ===")
-    print(f"CSV:         {csv_path}")
-    print(f"Chunk size:  {args.chunk_size}")
-    print(f"T_min clamp: {args.min_duration_sec}")
+    print(f"CSV:             {csv_path}")
+    print(f"Chunk size:      {args.chunk_size}")
+    print(f"T_min clamp:     {args.min_duration_sec}")
+    print(f"Correction mode: {args.correction_mode}")
     print()
     print("Estimated betas:")
     print(f"  beta0 (sec/step):  {res.beta0:.6f}")

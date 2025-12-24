@@ -915,60 +915,87 @@ p^{\mathrm{pf}}_{\mathrm{full}}(t)
 C \sum_r a_r(t).
 \end{equation}
 
-\paragraph{End-localized partial-chunk correction.}
-The missing mass $\mu_r$ should be subtracted from the prefill pressure
-near the end of request $r$’s prefill phase.
-Because traces do not expose global step boundaries, we localize this
-correction in time using a weighting function.
+\paragraph{No partial-chunk correction (baseline ablation).}
+The simplest baseline ignores partial chunks entirely and uses
+$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ as the effective prefill pressure.
+Under this choice, the estimator treats every prefill step as a full chunk,
+and the missing mass $\mu_r$ is not explicitly accounted for.
 
-Let $t_{r,\mathrm{pf\text{-}\mathrm{end}}}$ denote the trace-visible end time of request
-$r$’s prefill phase.
-Define a nonnegative correction weight $w_r(t)$ supported near
-$t_{r,\mathrm{pf\text{-}\mathrm{end}}}$ and normalized such that
+This option serves as a natural ablation: it is fully trace-only, requires no
+additional assumptions about where the final prefill step occurs in time, and
+provides a lower bound on estimator fidelity when chunking effects are mild.
+
+\paragraph{Uniform redistribution correction.}
+A more refined baseline accounts for the missing mass $\mu_r$ by redistributing
+it uniformly over the prefill interval of request $r$.
+Let $[t_{r,s}, t_{r,e})$ denote the trace-visible prefill interval of request $r$.
+Define a correction weight
 \[
-\int w_r(t)\,dt = 1.
+w_r(t)
+=
+\begin{cases}
+\frac{1}{t_{r,e}-t_{r,s}}, & t\in[t_{r,s},t_{r,e}),\\
+0, & \text{otherwise},
+\end{cases}
 \]
+which satisfies $\int w_r(t)\,dt = 1$.
 
-The refined effective prefill pressure is
+The effective prefill pressure is then
 \begin{equation}
 \tilde p^{\mathrm{pf}}(t)
 =
 p^{\mathrm{pf}}_{\mathrm{full}}(t)
 -
 \sum_r \mu_r\, w_r(t).
-\label{eq:refined_prefill_pressure}
+\label{eq:uniform_prefill_pressure}
 \end{equation}
-This construction preserves total prefill token mass exactly while
-localizing the partial-chunk correction near the end of prefill.
+This construction preserves total prefill token mass exactly while avoiding any
+assumption about the precise temporal location of the final prefill step.
+Uniform redistribution is therefore a conservative, smoothing correction that
+depends only on trace-visible phase boundaries.
 
-\paragraph{Interpretation of the correction weight.}
-Although $w_r(t)$ is normalized in wall-clock time, it is interpreted as a
-\emph{step-time attribution density}: $w_r(t)$ is chosen proportional to the
-local step density so that $\mu_r w_r(t)$ represents missing prefill mass
-expressed in units of tokens per step.
-Under this interpretation, $\tilde p^{\mathrm{pf}}(t)$ in
-Eq.~\eqref{eq:refined_prefill_pressure} remains a well-defined token pressure
-(tokens/step), consistent with the step-level execution model.
+\paragraph{End-localized partial-chunk correction.}
+Uniform redistribution implicitly assumes that the final prefill step is equally
+likely to occur anywhere within the prefill interval.
+An alternative trace-only assumption is that the final prefill step completes
+near the trace-visible end of the prefill phase.
 
+Let $t_{r,e}$ denote the end timestamp of request $r$’s prefill phase, and let
+$\mathcal{I}(t_{r,e})$ denote the smallest time-grid interval (induced by trace
+phase boundaries) that contains $t_{r,e}$.
+The end-localized correction assigns the entire missing mass $\mu_r$ to that
+interval.
 
-\paragraph{Uniform redistribution as a special case.}
-If $w_r(t)$ is chosen uniform over the prefill interval of request $r$, then
-Eq.~\eqref{eq:refined_prefill_pressure} reduces to uniform redistribution of
-$\rho_r/C$ across the prefill segment.
-This simple choice avoids boundary assumptions but smooths localized effects.
+Equivalently, this corresponds to choosing a correction weight $w_r(t)$ that is
+supported on $\mathcal{I}(t_{r,e})$ and normalized such that
+$\int w_r(t)\,dt = 1$.
+The resulting effective prefill pressure again takes the form
+\begin{equation}
+\tilde p^{\mathrm{pf}}(t)
+=
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+-
+\sum_r \mu_r\, w_r(t),
+\end{equation}
+but with $w_r(t)$ concentrated near the end of prefill rather than spread
+uniformly.
+
+This end-localized correction reflects the intuition that the final prefill
+iteration must occur immediately prior to the recorded prefill completion time,
+while remaining fully trace-only and avoiding any reconstruction of global step
+boundaries.
 
 \paragraph{Implementation note (no pointwise reconstruction required).}
-Although we define token pressures $p^{\mathrm{pf}}(t)$, $p^{\mathrm{dec}}(t)$ and
-the partial-chunk correction weights $w_r(t)$ as functions of wall-clock time,
-the baseline estimator never requires evaluating them instant by instant.
-It uses these objects only through time integrals over phase intervals, e.g.,
-$\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt$ and
-$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt$.
-In practice, these integrals can be computed exactly from the trace by sweeping
-over the sorted phase-boundary events and accumulating piecewise-constant
-overlap counts (and, for prefill, applying a per-request partial-chunk
-adjustment whose placement is irrelevant in the baseline as long as its total
-mass is preserved).
+Although we define token pressures and correction weights as functions of
+wall-clock time, the baseline estimator never requires evaluating them
+instantaneously.
+All quantities enter the estimator only through time integrals over phase
+intervals, such as
+$\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt$.
+These integrals can be computed exactly from trace-visible phase boundaries by
+sweeping over a piecewise-constant time grid and applying per-request correction
+masses whose placement within a grid interval does not affect correctness.
+
 
 
 \subsection{Baseline: Time-Integrated NNLS Estimation}

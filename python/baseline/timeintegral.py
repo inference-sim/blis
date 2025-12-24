@@ -17,8 +17,8 @@ Given a trace of *phase instances* (one row per prefill/decode phase):
   4) Reconstruct time-varying token pressures from overlap (Eq. (pressures)):
        - p_pf_full(t) = C * (# active prefill phases at t)   [tokens/step]
        - p_dec(t)     =      (# active decode phases at t)   [tokens/step]
-  5) Apply the baseline special case of partial-chunk correction (uniform redistribution):
-       - subtract missing prefill mass μ_r in *integrated form* (tokens), not per-step.
+  5) Apply partial-chunk correction for prefill chunking (mode: end/uniform/none):
+       - subtract missing prefill mass μ_r in integrated form (tokens), not per-step.
   6) Form baseline integrated exposures (Eq. (baseline_integrated_exposures)):
        - A_pf_i  [tokens]
        - A_dec_i [tokens]
@@ -44,7 +44,7 @@ Notation bridge to paper
 - Pressures:
     p_pf_full(t)      -> p_pf_full (piecewise-constant over time-grid segments)
     p_dec(t)          -> p_dec
-- Uniform correction:
+- Partial-chunk correction (mode-dependent):
     corr_rate(t)      -> corr_rate  (tokens/second over segments)
     ∫ corr_rate dt    -> corr_tokens (tokens)
 
@@ -73,7 +73,7 @@ pip install numpy pandas scikit-learn
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Union
+from typing import Dict, Union, Literal
 
 import numpy as np
 import pandas as pd
@@ -535,9 +535,9 @@ def _check_baseline_prefill_uniqueness(
 
     Why this exists
     ---------------
-    The uniform partial-chunk correction is implemented per request using the single
+    The partial-chunk correction is implemented per request using the single
     prefill interval [t_start, t_end). If a request's prefill is split into multiple
-    rows/segments, this baseline implementation would need the segments merged first.
+    rows/segments, this baseline implementation would need the segments to be made unique first.
 
     Inputs
     ------
@@ -561,7 +561,7 @@ def _check_baseline_prefill_uniqueness(
             bad_ids = counts[counts > 1].index.tolist()[:10]
             raise ValueError(
                 "Multiple prefill rows per request found. Baseline assumes at most one. "
-                f"Merge segments first. Example request_ids: {bad_ids}"
+                f"Make the segments unique first. Example request_ids: {bad_ids}"
             )
     return prefill_df
 
@@ -654,8 +654,8 @@ def _reconstruct_pressures(
     pre_mask = df[phase_type_col].eq("prefill").to_numpy()
     dec_mask = df[phase_type_col].eq("decode").to_numpy()
 
-    n_pf = _sweepline_counts(grid, starts[pre_mask], ends[pre_mask]) if pre_mask.any() else np.zeros(grid.size - 1)
-    n_dec = _sweepline_counts(grid, starts[dec_mask], ends[dec_mask]) if dec_mask.any() else np.zeros(grid.size - 1)
+    n_pf = _sweepline_counts(grid, starts[pre_mask], ends[pre_mask]) if pre_mask.any() else np.zeros(grid.size - 1, dtype=np.int64)
+    n_dec = _sweepline_counts(grid, starts[dec_mask], ends[dec_mask]) if dec_mask.any() else np.zeros(grid.size - 1, dtype=np.int64)
 
     p_pf_full = float(chunk_size) * n_pf.astype(np.float64)
     p_dec = n_dec.astype(np.float64)
@@ -766,6 +766,205 @@ def _build_uniform_partial_chunk_correction_rate(
     I_corr = _prefix_integral(grid, corr_rate)
     return corr_rate, I_corr
 
+def _build_end_partial_chunk_correction_rate(
+    df: pd.DataFrame,
+    *,
+    grid: np.ndarray,
+    chunk_size: int,
+    prefill_df: pd.DataFrame,
+    t_start_col: str,
+    t_end_col: str,
+    prefill_tokens_col: str,
+    n_steps_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build the baseline's *end-localized* partial-chunk correction signal.
+
+    Paper mapping (End-localized partial-chunk correction):
+      - For each prefill request r:
+          N_r = ceil(P_r / C)
+          ρ_r = P_r - C*(N_r-1)  in (0, C]
+          μ_r = C - ρ_r          in [0, C)
+      - End-localized assumption:
+          The final (possibly partial) prefill step occurs near the trace-visible
+          end of prefill at time t_{r,e}. We therefore assign the entire missing
+          mass μ_r to the *single* time-grid segment that contains t_{r,e}.
+
+    Concretely, letting j(r) be the segment index such that:
+        t_{r,e} ∈ [grid[j(r)], grid[j(r)+1]),   (with boundary clamping)
+    we define a piecewise-constant correction rate:
+        corr_rate(t) = Σ_r  μ_r / Δt_{j(r)}    on segment j(r),
+    where Δt_{j} = grid[j+1] - grid[j].
+
+    The estimator uses the correction only through integrated form:
+        corr_tokens(a,b) = ∫_a^b corr_rate(t) dt  [tokens]
+
+    Inputs
+    ------
+    df : pd.DataFrame, shape (n, ...)
+        Full phase table; used for column presence checks.
+    grid : np.ndarray, shape (M,)
+        Global time grid.
+    chunk_size : int
+        C, tokens per prefill step.
+    prefill_df : pd.DataFrame, shape (n_pf, ...)
+        Prefill-only subset (one row per request, enforced by caller).
+        Must contain:
+          - t_end_col (t_{r,e})
+          - prefill_tokens_col (P_r)
+          - n_steps_col (N_r)
+        Note: t_start_col is accepted for signature compatibility but is not
+        required for end-localized placement (only t_end matters).
+    t_start_col, t_end_col : str
+        Column names for prefill interval boundaries.
+        (Only t_end_col is used by this implementation.)
+    prefill_tokens_col : str
+        Column name for number of prefill tokens P_r.
+    n_steps_col : str
+        Column name for inferred prefill steps N_r.
+
+    Outputs
+    -------
+    corr_rate : np.ndarray, shape (S=M-1,), float64
+        Aggregate correction rate over all requests, units: tokens/second.
+        For end-localized correction, each request contributes to *exactly one*
+        segment: the one containing its t_end.
+    I_corr : np.ndarray, shape (M,), float64
+        Prefix integral of corr_rate over time:
+          I_corr[k] = ∫_{grid[0]}^{grid[k]} corr_rate(t) dt
+        units: tokens.
+
+    Notes on why units differ
+    -------------------------
+    - p_pf_full is tokens/step, so ∫ p_pf_full dt is (tokens/step)*seconds.
+    - corr_rate is tokens/second, so ∫ corr_rate dt is tokens.
+
+    In the exposure computation, corr_tokens must be subtracted directly from A_pf_i
+    (which is also tokens). It must NOT be multiplied by λ̂_i.
+
+    Edge cases / clamping
+    ---------------------
+    - If t_end equals the last grid boundary (grid[-1]), we clamp to the final
+      segment index S-1. This preserves the "assign to the smallest grid interval
+      containing t_end" intent under half-open segment conventions.
+    - If a segment has zero duration (should not happen with unique sorted grid),
+      we raise to avoid division by zero.
+    """
+    corr_rate = np.zeros(grid.size - 1, dtype=np.float64)
+
+    if prefill_df.empty:
+        I_corr = _prefix_integral(grid, corr_rate)
+        return corr_rate, I_corr
+
+    _require_columns(df, [prefill_tokens_col])
+
+    # Pull per-request quantities
+    te = prefill_df[t_end_col].to_numpy(dtype=np.float64)
+    P = prefill_df[prefill_tokens_col].astype(float).to_numpy()
+    N = prefill_df[n_steps_col].astype(float).to_numpy()
+
+    # Compute missing mass μ_r = C - ρ_r, where ρ_r = P_r - C*(N_r-1)
+    rho = P - float(chunk_size) * (N - 1.0)
+    rho = np.clip(rho, 0.0, float(chunk_size))
+    mu = float(chunk_size) - rho
+    mu = np.clip(mu, 0.0, float(chunk_size))
+
+    # Identify the grid segment containing t_end.
+    # Using half-open segments [grid[j], grid[j+1]), we compute:
+    #   j = rightmost grid index <= t_end, then clamp to [0, S-1].
+    S = grid.size - 1
+    j_end = np.searchsorted(grid, te, side="right") - 1
+    j_end = np.clip(j_end, 0, S - 1).astype(np.int64)
+
+    # Segment durations for rate conversion (tokens -> tokens/sec)
+    dt = grid[1:] - grid[:-1]  # shape (S,)
+    if np.any(dt <= 0):
+        raise ValueError("Non-positive grid segment duration found; cannot compute end-localized correction.")
+
+    # Each request contributes μ_r tokens to exactly one segment; convert to rate.
+    rate = mu / dt[j_end]  # tokens/second (per request, on its end segment)
+
+    # Accumulate per-segment rates. (No need for a delta sweep: each request hits one segment.)
+    np.add.at(corr_rate, j_end, rate)
+
+    I_corr = _prefix_integral(grid, corr_rate)
+    return corr_rate, I_corr
+
+
+PartialChunkCorrectionMode = Literal["uniform", "end", "none"]
+
+
+def _build_partial_chunk_correction_rate(
+    df: pd.DataFrame,
+    *,
+    grid: np.ndarray,
+    chunk_size: int,
+    prefill_df: pd.DataFrame,
+    t_start_col: str,
+    t_end_col: str,
+    prefill_tokens_col: str,
+    n_steps_col: str,
+    mode: PartialChunkCorrectionMode = "end",
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Dispatch wrapper for partial-chunk correction modes.
+
+    This function exists to:
+      (i) support a baseline ablation ("none"),
+      (ii) support the paper-described alternatives ("uniform", "end").
+
+    Modes
+    -----
+    - mode="uniform":
+        Uniformly redistributes missing mass μ_r over the entire prefill interval.
+        Calls _build_uniform_partial_chunk_correction_rate.
+
+    - mode="end" (default):
+        Assigns the entire missing mass μ_r to the grid segment containing the
+        prefill end timestamp t_{r,e}. Calls _build_end_partial_chunk_correction_rate.
+
+    - mode="none":
+        No correction is applied (baseline ablation). Returns an all-zero correction
+        rate and corresponding prefix integral.
+
+    Inputs / Outputs
+    ----------------
+    Same as _build_uniform_partial_chunk_correction_rate for compatibility.
+    Returns (corr_rate, I_corr) with:
+      - corr_rate shape (S=M-1,), units tokens/second
+      - I_corr shape (M,), units tokens
+    """
+    if mode == "uniform":
+        return _build_uniform_partial_chunk_correction_rate(
+            df,
+            grid=grid,
+            chunk_size=chunk_size,
+            prefill_df=prefill_df,
+            t_start_col=t_start_col,
+            t_end_col=t_end_col,
+            prefill_tokens_col=prefill_tokens_col,
+            n_steps_col=n_steps_col,
+        )
+
+    if mode == "end":
+        return _build_end_partial_chunk_correction_rate(
+            df,
+            grid=grid,
+            chunk_size=chunk_size,
+            prefill_df=prefill_df,
+            t_start_col=t_start_col,
+            t_end_col=t_end_col,
+            prefill_tokens_col=prefill_tokens_col,
+            n_steps_col=n_steps_col,
+        )
+
+    if mode == "none":
+        corr_rate = np.zeros(grid.size - 1, dtype=np.float64)
+        I_corr = _prefix_integral(grid, corr_rate)
+        return corr_rate, I_corr
+
+    raise ValueError(f"Unknown correction mode: {mode}. Expected one of: 'uniform', 'end', 'none'.")
+
 
 def _compute_exposures(
     df: pd.DataFrame,
@@ -813,7 +1012,7 @@ def _compute_exposures(
     I_pf_full, I_dec : np.ndarray, shape (M,)
         Prefix integrals of pressures, units: (tokens/step)*seconds.
     corr_rate : np.ndarray, shape (S=M-1,)
-        Uniform correction rate per segment, tokens/second.
+        Partial-chunk correction rate per segment, tokens/second
     I_corr : np.ndarray, shape (M,)
         Prefix integral of corr_rate, units: tokens.
 
@@ -959,7 +1158,7 @@ def _compute_diagnostics(
 
 
 # =============================================================================
-# Main estimator (public API unchanged)
+# Main estimator
 # =============================================================================
 def estimate_betas_baseline(
     phases: pd.DataFrame,
@@ -974,9 +1173,10 @@ def estimate_betas_baseline(
     decode_tokens_col: str = "decode_tokens", # used for decode step count
     n_steps_col: str = "N_steps",             # optional; if missing, inferred
     min_duration_sec: float = 0.0,            # set >0 if you want to clamp ultra-small durations
+    correction_mode: PartialChunkCorrectionMode = "end"
 ) -> BaselineBetaResult:
     """
-    Baseline estimator (time-integrated NNLS) with uniform partial-chunk correction.
+    Baseline estimator (time-integrated NNLS) with configurable partial-chunk correction.
 
     This function is the public entrypoint. It orchestrates the full pipeline described
     at the top of this file, without exposing internal representations.
@@ -1006,6 +1206,13 @@ def estimate_betas_baseline(
           - forming full-chunk prefill pressure p_pf_full(t) = C * (#active prefill)
           - computing partial-chunk missing mass μ_r for the correction
 
+    correction_mode : {"end", "uniform", "none"}, default="end"
+        Partial-chunk correction mode for prefill chunking:
+          - "end": end-localized correction (paper default). Assigns missing
+            prefill mass μ_r to the grid segment containing the prefill end time.
+          - "uniform": uniformly redistributes μ_r over the entire prefill interval.
+          - "none": disables partial-chunk correction (baseline ablation).
+          
     Column-name parameters
     ----------------------
     All *_col parameters let you map your trace schema into the expected semantics.
@@ -1024,7 +1231,8 @@ def estimate_betas_baseline(
     Estimation meaning (paper)
     --------------------------
     This corresponds to solving Eq. (baseline_nnls) using baseline features
-    from Eq. (baseline_integrated_exposures) with uniform partial-chunk correction.
+    from Eq. (baseline_integrated_exposures) with the specified partial-chunk
+    correction mode (default: end-localized).
     """
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
@@ -1037,6 +1245,9 @@ def estimate_betas_baseline(
         t_start_col=t_start_col,
         t_end_col=t_end_col,
     )
+
+    if df.empty:
+        raise ValueError("No phase rows provided after validation.")
 
     # 2) Get / infer step counts N_i
     df = _infer_or_read_step_counts(
@@ -1055,6 +1266,14 @@ def estimate_betas_baseline(
         t_end_col=t_end_col,
         min_duration_sec=min_duration_sec,
     )
+
+    for col in ["N_i", "T_i", "lambda_hat"]:
+        if not np.isfinite(df[col]).all():
+            raise ValueError(f"Non-finite values in {col}.")
+    if (df["N_i"] < 0).any():
+        raise ValueError("Negative N_i found.")
+    if (df["T_i"] <= 0).any():
+        raise ValueError("Non-positive T_i found.")
 
     # Baseline schema assumption: at most one prefill row per request
     prefill_df = _check_baseline_prefill_uniqueness(
@@ -1076,8 +1295,8 @@ def estimate_betas_baseline(
         phase_type_col=phase_type_col,
     )
 
-    # 5) Uniform partial-chunk correction (baseline usage)
-    corr_rate, I_corr = _build_uniform_partial_chunk_correction_rate(
+    # 5) partial-chunk correction
+    corr_rate, I_corr = _build_partial_chunk_correction_rate(
         df,
         grid=grid,
         chunk_size=chunk_size,
@@ -1086,6 +1305,7 @@ def estimate_betas_baseline(
         t_end_col=t_end_col,
         prefill_tokens_col=prefill_tokens_col,
         n_steps_col=n_steps_col,
+        mode=correction_mode,
     )
 
     # 6) Compute exposures A_pf_i and A_dec_i
@@ -1104,6 +1324,14 @@ def estimate_betas_baseline(
         I_corr=I_corr,
     )
 
+    mask_bad = (~np.isfinite(df["A_pf_i"])) | (~np.isfinite(df["A_dec_i"]))
+    if mask_bad.any():
+        bad = df.loc[mask_bad]
+        raise ValueError(
+            "Non-finite exposures found (A_pf_i/A_dec_i). "
+            f"Bad rows (first 5):\n{bad.head(5)}"
+        )
+    
     # 7) NNLS regression
     model, beta0, beta1, beta2, X, y = _fit_nnls_betas(df)
 
