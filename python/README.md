@@ -15,7 +15,6 @@ From this directory:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
 pip install -e .
 ```
 
@@ -78,7 +77,7 @@ The project uses `pytest` for unit tests and `pytest-cov` for coverage reporting
 From this directory, with the virtual environment activated:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+pip install -e '.[dev]'
 ```
 
 ### Run tests
