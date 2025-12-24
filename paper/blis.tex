@@ -34,7 +34,6 @@
 % --- Theorems, lemmas, claims, proofs ---
 \usepackage{amsthm}
 
-% Number theorems within sections; share a counter across theorem-like envs.
 \theoremstyle{plain} % bold headings, italic body
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}[theorem]{Lemma}
@@ -96,8 +95,8 @@ designed to model inference request flows and latency.
 \section{Design overview}
 \label{sec:design-overview}
 
-BLIS is primarily geared towards vLLM. We will describe extensions for other
-inference platforms like sglang in Section \ref{sec:future-work}.
+BLIS is primarily geared towards vLLM; we discuss extensions 
+to other inference platforms (e.g., sglang) in future work.
 
 \subsection{vLLM overview}
 \label{subsec:vllm-overview}
@@ -222,42 +221,54 @@ this section and their units.
 \midrule
 $k$ & step index & busy-loop iteration (latent execution step) \\
 $r$ & request index & inference request; each has exactly one prefill phase and one decode phase \\
-$i$ & phase index & a specific phase (prefill or decode) of a specific request \\[0.5ex]
+$i$ & phase index & a specific phase (prefill or decode) of a specific request \\
+$m$ & iteration index & outer iteration of the step-density reweighted estimator \\[0.5ex]
 
 $t_{i,s},\,t_{i,e}$ & seconds & start and end times of phase $i$ \\
 $\ell_i$ & seconds & observed duration of phase $i$ \\
-$N_i$ & steps & step count for phase $i$ (fixed using traces during estimation) \\
+$N_i$ & steps & trace-inferred step count for phase $i$ (held fixed during estimation) \\
 $\tau_i$ & categorical (unitless) & phase type of instance $i$ (\textsf{prefill} or \textsf{decode}) \\
-$T^{\mathrm{pf}}_k,\,T^{\mathrm{dec}}_k$ & tokens & prefill/decode token totals processed in step $k$ \\
+$T^{\mathrm{pf}}_k,\,T^{\mathrm{dec}}_k$ & tokens & prefill/decode token totals processed in step $k$ \\[0.5ex]
 
 $C$ & tokens/step & prefill chunk size \\
-$P_r$ & tokens & total prefill tokens for request $r$ \\
+$P_r$ & tokens & total (uncached) prefill tokens for request $r$ \\
 $D_r$ & tokens & total decode tokens for request $r$ \\
-$\mu_r$ & tokens & missing token mass of final prefill chunk \\[0.5ex]
+$\rho_r$ & tokens & tokens processed in the final prefill step of request $r$, Eq.~\eqref{eq:rho_def} \\
+$\mu_r$ & tokens & missing token mass of final prefill chunk, $\mu_r=C-\rho_r$ \\[0.5ex]
 
-$p^{\mathrm{pf}}(t)$ & tokens/step & instantaneous prefill pressure \\
-$p^{\mathrm{dec}}(t)$ & tokens/step & instantaneous decode pressure \\
-$\tilde p^{\mathrm{pf}}(t)$ & tokens/step & instantaneous effective prefill pressure (baseline) \\
-$\tilde p^{\mathrm{pf}}(t;\beta)$ & tokens/step & instantaneous effective prefill pressure (iterative) \\[0.5ex]
+$a_r(t)$ & unitless & indicator that request $r$ is in prefill at time $t$ (trace-visible) \\
+$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ & tokens/step & naive full-chunk prefill pressure, $C\sum_r a_r(t)$ \\
+$p^{\mathrm{dec}}(t)$ & tokens/step & decode pressure (tokens/step) from overlapping decode phases \\[0.5ex]
 
-$\widehat{\lambda}_i$ & steps/sec & phase-local step density proxy (baseline) \\
-$\lambda(t;\beta)$ & steps/sec & instantaneous step density (iterative) \\[0.5ex]
+$\widehat{\lambda}_i$ & steps/sec & baseline phase-local step density proxy, $\widehat{\lambda}_i=N_i/\ell_i$ \\
+$c(t)$ & tokens/sec & baseline partial-chunk correction signal (uniform/end/none) \\[0.5ex]
 
-$q_i(t;\beta)$ & 1/sec & normalized step-time attribution within phase $i$ \\
-$q_r(t;\beta)$ & 1/sec & normalized step-time attribution for request $r$'s prefill \\[0.5ex]
+$A_i^{\mathrm{pf}}$ & tokens & baseline prefill exposure, Eq.~\eqref{eq:baseline_integrated_exposures_pf} \\
+$A_i^{\mathrm{dec}}$ & tokens & baseline decode exposure, Eq.~\eqref{eq:baseline_integrated_exposures_dec} \\[0.5ex]
 
-$A_i^{\mathrm{pf}}$ & tokens & baseline prefill exposure \\
-$A_i^{\mathrm{dec}}$ & tokens & baseline decode exposure \\
-$\bar p_i^{\mathrm{pf}}(\beta)$ & tokens/step & step-averaged prefill pressure (yields step-weighted exposure via $N_i\bar p$) \\
-$\bar p_i^{\mathrm{dec}}(\beta)$ & tokens/step & step-averaged decode pressure (yields step-weighted exposure via $N_i\bar p$) \\[0.5ex]
+$\Delta^{(m)}(t)$ & sec/step & iteration-$m$ local step-time model, Eq.~\eqref{eq:local_step_time_m} \\
+$\lambda^{(m)}(t)$ & steps/sec & iteration-$m$ step density, $\lambda^{(m)}(t)=1/\Delta^{(m)}(t)$, Eq.~\eqref{eq:step_density_m} \\[0.5ex]
 
-$\beta_0$ & sec/step & fixed per-step overhead \\
-$\beta_1,\beta_2$ & sec/token & per-token execution costs \\
+$q_i^{(m)}(t)$ & 1/sec & iteration-$m$ phase time-density proportional to $\lambda^{(m)}$ over $[t_{i,s},t_{i,e})$ \\
+$q_r^{(m)}(t)$ & 1/sec & iteration-$m$ request time-density proportional to $\lambda^{(m)}$ over $[t_{r,s},t_{r,e})$ \\
+$\mathcal{W}_r^{(m)}$ & time subset & iteration-$m$ last-step window for request $r$, Eq.~\eqref{eq:last_step_window_m} \\[0.5ex]
+
+$c_r^{(m)}(t)$ & tokens/sec & iteration-$m$ request-level correction signal, Eq.~\eqref{eq:cr_beta_informed_m} \\
+$c^{(m)}(t)$ & tokens/sec & iteration-$m$ aggregate correction signal, $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$ \\
+$\tilde p^{\mathrm{pf},(m)}(t)$ & tokens/step & iteration-$m$ effective prefill pressure, Eq.~\eqref{eq:prefill_pressure_beta_informed_m} \\[0.5ex]
+
+$\bar p_i^{\mathrm{pf},(m)}$ & tokens/step & iteration-$m$ step-averaged prefill pressure, Eq.~\eqref{eq:step_averaged_pressures_m} \\
+$\bar p_i^{\mathrm{dec},(m)}$ & tokens/step & iteration-$m$ step-averaged decode pressure, Eq.~\eqref{eq:step_averaged_pressures_m} \\[0.5ex]
+
+$\beta_0$ & sec/step & fixed per-step overhead coefficient \\
+$\beta_1,\beta_2$ & sec/token & per-token execution costs (prefill / decode) \\
+$\beta^{(m)}$ & mixed & coefficient vector at outer iteration $m$ \\
 \bottomrule
 \end{tabular}
 \caption{Notation and units used in trace-only step-level coefficient estimation.}
 \label{tab:notation_summary}
 \end{table}
+
 
 
 % ============================================================
@@ -390,24 +401,40 @@ time integrals on the trace-induced grid.
 
 \paragraph{Terminology: instantaneous quantities and exposures.}
 We distinguish between \emph{instantaneous} quantities, which are defined as
-functions of wall-clock time $t$ on the trace-induced grid (e.g., instantaneous
-pressures in tokens/step and instantaneous step density in steps/sec), and
+functions of wall-clock time $t$ on the trace-induced grid, and
 \emph{exposures}, which are obtained by integrating instantaneous quantities
-over a phase window (optionally with step-density weighting) and serve as
-regression features. We reserve the term \emph{rate} for quantities defined per
-unit time (e.g., step density), and use \emph{pressure} for quantities defined
-per step (tokens/step).
+over a phase window and serve as regression features.
+Instantaneous \emph{pressures} quantify work performed per execution step
+(tokens/step). The \emph{step density} $\lambda^{(m)}(t)$ (steps/sec) quantifies
+how frequently busy-loop steps occur in wall-clock time under the iteration-$m$
+local step-time model (Section~\ref{sec:local_step_density}).
+Exposures are phase- or request-level scalars with units of tokens, obtained
+either by converting time-integrated pressures using a step density proxy
+(baseline) or by aggregating step-averaged pressures over a fixed step count
+(iterative estimator).
+Throughout, all quantities are defined and combined in a manner consistent
+with their physical units.
+
 
 \paragraph{Instantaneous token pressures.}
-Let $p^{\mathrm{pf}}(t)$ and $p^{\mathrm{dec}}(t)$ denote the 
-\emph{instantaneous} prefill and decode pressures (tokens/step) 
-induced by the set of requests whose trace-visible phases overlap time $t$. 
-Equivalently, they are the token totals that would be attributed to a 
-representative busy-loop step executed during the wall-clock instant $t$.
-These signals are reconstructed deterministically from phase overlap and 
-scheduling semantics on the trace-induced time grid.
+We define two trace-derived, piecewise-constant \emph{instantaneous pressures}
+(tokens/step) on the trace-induced time grid.
+The decode pressure $p^{\mathrm{dec}}(t)$ is the total decode-token work that would
+be attributed to a representative busy-loop step executed at wall-clock time $t$,
+given the set of requests whose trace-visible decode phases overlap $t$.
+For prefill, we use the \emph{naive full-chunk} pressure
+\[
+p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t),
+\]
+which treats each active prefill request as contributing $C$ tokens per step.
+Any accounting for the final partial prefill chunk is represented separately,
+either through a correction \emph{in exposure space} in the baseline
+(via $c(t)$), or through an \emph{iteration-indexed effective pressure}
+$\tilde p^{\mathrm{pf},(m)}(t)$ constructed from the 
+current iterate $\beta^{(m)}$ (Section~\ref{sec:beta_informed_prefill_correction}).
 
-\subsubsection{Prefill Chunking and Partial-Chunk Correction}
+
+\subsubsection{Prefill Chunking and Partial-Chunk Correction Signals}
 \label{sec:prefill_correction}
 
 Decode contributes exactly one token per active request per step.
@@ -447,65 +474,65 @@ This option serves as a natural ablation: it is fully trace-only, requires no
 additional assumptions about where the final prefill step occurs in time, and
 provides a lower bound on estimator fidelity when chunking effects are mild.
 
-\paragraph{Uniform redistribution correction.}
+\paragraph{Uniform redistribution correction (implemented in integrated form).}
 A more refined baseline accounts for the missing mass $\mu_r$ by redistributing
-it uniformly over the prefill interval of request $r$.
+it uniformly over the prefill interval of request $r$, but it does so in a way
+that is dimensionally consistent with the baseline feature construction.
+
 Let $[t_{r,s}, t_{r,e})$ denote the trace-visible prefill interval of request $r$.
-Define a correction weight
-\[
-w_r(t)
-=
-\begin{cases}
-\frac{1}{t_{r,e}-t_{r,s}}, & t\in[t_{r,s},t_{r,e}),\\
-0, & \text{otherwise},
-\end{cases}
-\]
-which satisfies $\int w_r(t)\,dt = 1$.
-
-The effective prefill pressure is then
+Define a \emph{correction signal} (tokens/second)
 \begin{equation}
-\tilde p^{\mathrm{pf}}(t)
+c_r^{\mathrm{uni}}(t)
 =
-p^{\mathrm{pf}}_{\mathrm{full}}(t)
--
-\sum_r \mu_r\, w_r(t).
-\label{eq:uniform_prefill_pressure}
+\frac{\mu_r}{t_{r,e}-t_{r,s}}\,
+\mathbf{1}\{t\in[t_{r,s},t_{r,e})\},
+\qquad
+\text{units: tokens/second},
+\label{eq:uniform_corr_signal}
 \end{equation}
-This construction preserves total prefill token mass exactly while avoiding any
-assumption about the precise temporal location of the final prefill step.
-Uniform redistribution is therefore a conservative, smoothing correction that
-depends only on trace-visible phase boundaries.
-
-\paragraph{End-localized partial-chunk correction.}
-Uniform redistribution implicitly assumes that the final prefill step is equally
-likely to occur anywhere within the prefill interval.
-An alternative trace-only assumption is that the final prefill step completes
-near the trace-visible end of the prefill phase.
-
-Let $t_{r,e}$ denote the end timestamp of request $r$’s prefill phase, and let
-$\mathcal{I}(t_{r,e})$ denote the smallest time-grid interval (induced by trace
-phase boundaries) that contains $t_{r,e}$.
-The end-localized correction assigns the entire missing mass $\mu_r$ to that
-interval.
-
-Equivalently, this corresponds to choosing a correction weight $w_r(t)$ that is
-supported on $\mathcal{I}(t_{r,e})$ and normalized such that
-$\int w_r(t)\,dt = 1$.
-The resulting effective prefill pressure again takes the form
+and let the aggregate correction signal be
 \begin{equation}
-\tilde p^{\mathrm{pf}}(t)
-=
-p^{\mathrm{pf}}_{\mathrm{full}}(t)
--
-\sum_r \mu_r\, w_r(t),
+c^{\mathrm{uni}}(t)=\sum_r c_r^{\mathrm{uni}}(t).
+\label{eq:uniform_corr_signal_sum}
 \end{equation}
-but with $w_r(t)$ concentrated near the end of prefill rather than spread
-uniformly.
+By construction, $\int_{t_{r,s}}^{t_{r,e}} c_r^{\mathrm{uni}}(t)\,dt=\mu_r$,
+so total missing token mass is preserved exactly when integrating over time.
 
-This end-localized correction reflects the intuition that the final prefill
-iteration must occur immediately prior to the recorded prefill completion time,
-while remaining fully trace-only and avoiding any reconstruction of global step
-boundaries.
+\paragraph{End-localized partial-chunk correction (implemented on the trace grid).}
+Uniform redistribution implicitly assumes the final prefill step could occur
+anywhere within the prefill interval. An alternative trace-only assumption is
+that the final prefill step completes near the trace-visible end time $t_{r,e}$.
+
+Let $\{[g_j,g_{j+1})\}$ denote the trace-induced time grid formed by all phase
+boundaries, and let $j(r)$ be the index of the unique grid segment containing
+$t_{r,e}$ (under the half-open convention, with boundary clamping at the end).
+Define the per-request end-localized correction signal (tokens/second)
+\begin{equation}
+c_r^{\mathrm{end}}(t)
+=
+\frac{\mu_r}{g_{j(r)+1}-g_{j(r)}}\,
+\mathbf{1}\{t\in[g_{j(r)},g_{j(r)+1})\},
+\qquad
+\text{units: tokens/second},
+\label{eq:end_corr_signal}
+\end{equation}
+and the aggregate correction signal
+\begin{equation}
+c^{\mathrm{end}}(t)=\sum_r c_r^{\mathrm{end}}(t).
+\label{eq:end_corr_signal_sum}
+\end{equation}
+Again, $\int c_r^{\mathrm{end}}(t)\,dt=\mu_r$ by construction.
+
+\paragraph{Remark (why we use correction signals in the baseline).}
+In the baseline, instantaneous token pressures are represented in units of
+tokens/step and only enter the estimator through time integrals that are
+subsequently converted into token totals via the phase-local step-density proxy
+$\widehat\lambda_i$ (Eq.~\eqref{eq:baseline_lambda_hat}). The partial-chunk 
+correction is therefore represented as a \emph{time-based}
+correction signal $c(t)$ (tokens/sec) so that its time integral is 
+directly in tokens and can be subtracted in exposure space without introducing any
+step-boundary assumptions.
+
 
 \paragraph{Implementation note (no pointwise reconstruction required).}
 Although we define token pressures and correction weights as functions of
@@ -513,7 +540,9 @@ wall-clock time, the baseline estimator never requires evaluating them
 instantaneously.
 All quantities enter the estimator only through time integrals over phase
 intervals, such as
-$\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt$.
+$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt$
+and
+$\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt$.
 These integrals can be computed exactly from trace-visible phase boundaries by
 sweeping over a piecewise-constant time grid and applying per-request correction
 masses whose placement within a grid interval does not affect correctness.
@@ -536,7 +565,7 @@ phase-local constant step density.
 \caption{Baseline trace-only estimation}
 \label{alg:baseline_intuition}
 \begin{algorithmic}[1]
-\Require Phase traces $\{(r_i,\tau_i,t_{i,s},t_{i,e},P_{r_i},D_i)\}$, chunk size $C$
+\Require Phase traces $\{(r_i,\tau_i,t_{i,s},t_{i,e},P_{r_i},D_{r_i})\}$, chunk size $C$
 \Ensure Estimated execution coefficients $\hat\beta$
 
 \For{each phase instance $i$}
@@ -549,17 +578,17 @@ phase-local constant step density.
 
 \For{each time interval in the grid}
   \State measure concurrent prefill and decode activity
-  \Comment{overlap $\Rightarrow$ \emph{instantaneous} pressures $p^{\mathrm{pf}}(t),p^{\mathrm{dec}}(t)$ on the grid; §\ref{sec:pressures}}
+  \Comment{overlap $\Rightarrow$ \emph{instantaneous} pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t),p^{\mathrm{dec}}(t)$ on the grid; §\ref{sec:pressures}}
 \EndFor
 
 \For{each prefill request $r$}
   \State apply trace-only partial-chunk correction (optional)
-  \Comment{missing mass $\mu_r$ and correction weights for \emph{instantaneous effective prefill pressure} $\tilde p^{\mathrm{pf}}(t)$; §\ref{sec:prefill_correction}, Eq.~\eqref{eq:rho_def}--Eq.~\eqref{eq:uniform_prefill_pressure}}
+  \Comment{missing mass $\mu_r$ and trace-only correction signal $c(t)$ (tokens/sec); §\ref{sec:prefill_correction}, Eq.~\eqref{eq:rho_def}, Eq.~\eqref{eq:uniform_corr_signal_sum}/Eq.~\eqref{eq:end_corr_signal_sum}}
 \EndFor
 
 \For{each phase instance $i$}
   \State compute phase-level prefill and decode exposures
-  \Comment{baseline exposures $A_i^{\mathrm{pf}},A_i^{\mathrm{dec}}$ from instantaneous pressures and phase-local step density; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_lambda_hat}, Eq.~\eqref{eq:baseline_integrated_exposures}}
+  \Comment{baseline exposures $A_i^{\mathrm{pf}},A_i^{\mathrm{dec}}$ from instantaneous pressures and phase-local step density; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_lambda_hat}, Eq.~\eqref{eq:baseline_integrated_exposures_pf}, Eq.~\eqref{eq:baseline_integrated_exposures_dec}}
 \EndFor
 
 \State fit execution coefficients via NNLS
@@ -574,13 +603,12 @@ phase-local constant step density.
 \paragraph{Phase-local step density.}
 For phase instance $i$, let $\ell_i=t_{i,e}-t_{i,s}$ be its observed duration and
 let $N_i\in\mathbb{N}$ be the trace-inferred step count.
-We define the (phase-local) step density proxy
+We define the (phase-local) \emph{step density proxy} (steps/sec)
 \begin{equation}
-\widehat\lambda_i \;=\; \frac{N_i}{\ell_i},
-\qquad
-\text{units: steps/second}.
+\widehat\lambda_i \;=\; \frac{N_i}{\ell_i}.
 \label{eq:baseline_lambda_hat}
 \end{equation}
+
 This assumes steps are spread approximately uniformly over the phase window,
 and is used \emph{only} to convert time integrals into step-aggregated token
 totals in the baseline.\footnote{Implementation detail: to avoid extreme $\widehat{\lambda}_i$ when $\ell_i$
@@ -590,24 +618,34 @@ We emphasize that $\widehat{\lambda}_i$ is a surrogate step-density used only
 to convert time-integrated pressures into step-aggregated token exposures.
 
 
-
 \paragraph{Phase-level exposures (baseline regression features).}
-We define baseline phase-level exposures
+Let $p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t)$ denote the naive full-chunk
+prefill pressure (tokens/step), and let $p^{\mathrm{dec}}(t)$ denote the decode
+pressure (tokens/step). Let $c(t)$ denote a chosen partial-chunk correction signal
+(tokens/second), e.g., $c^{\mathrm{uni}}(t)$ from Eq.~\eqref{eq:uniform_corr_signal_sum},
+$c^{\mathrm{end}}(t)$ from Eq.~\eqref{eq:end_corr_signal_sum}, or $c(t)\equiv 0$ (ablation).
+
+We define baseline phase-level exposures (tokens) as
 \begin{align}
 A^{\mathrm{pf}}_i
 &=
-\int_{t_{i,s}}^{t_{i,e}}
-\tilde p^{\mathrm{pf}}(t)\,\widehat\lambda_i\,dt,
-&
+\left[ \widehat\lambda_i
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt \right]
+\;-\;
+\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt,
+\label{eq:baseline_integrated_exposures_pf}
+\\
 A^{\mathrm{dec}}_i
 &=
-\int_{t_{i,s}}^{t_{i,e}}
-p^{\mathrm{dec}}(t)\,\widehat\lambda_i\,dt,
-\label{eq:baseline_integrated_exposures}
+\widehat\lambda_i
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt.
+\label{eq:baseline_integrated_exposures_dec}
 \end{align}
-which have units of tokens because $\tilde p^{\mathrm{pf}}(t)$ and
-$p^{\mathrm{dec}}(t)$ are in tokens/step and $\widehat\lambda_i$ is in
-steps/second.
+The integrals of $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and $p^{\mathrm{dec}}(t)$ have
+units $(\text{tokens}/\text{step})\cdot \text{seconds}$, which are converted into
+tokens by $\widehat\lambda_i$ (steps/second), while $\int c(t)\,dt$ is already in tokens.
+Accordingly, the correction term is \emph{not} multiplied by $\widehat\lambda_i$.
+
 
 \paragraph{Baseline predictor.}
 The baseline predicts phase duration as
@@ -677,23 +715,23 @@ prefill partial chunk using the inferred step-density model.
 
 \Repeat
   \State compute step density across time intervals from $\beta$
-  \Comment{\emph{instantaneous} step-time and step-density on the trace grid; §\ref{sec:step_density}, Eq.~\eqref{eq:local_step_time}, Eq.~\eqref{eq:step_density}}
+  \Comment{\emph{instantaneous} step-time and step-density on the trace grid; §\ref{sec:local_step_density}, Eq.~\eqref{eq:local_step_time_m}, Eq.~\eqref{eq:step_density_m}}
 
   \State assign step exposure across time intervals
-  \Comment{trace-grid integration of instantaneous step density; §\ref{sec:step_density}}
+  \Comment{compute phase/request attribution densities $q_i^{(m)},q_r^{(m)}$ from $\lambda^{(m)}$ on the trace grid; §\ref{sec:local_step_density}}
 
   \For{each prefill request $r$}
     \State localize final partial chunk using step density
-    \Comment{$\beta$-informed placement of missing prefill tokens within the prefill window via request-level attribution and last-step window; §\ref{sec:beta_informed_prefill_correction}, Eq.~\eqref{eq:qr_def}--Eq.~\eqref{eq:last_step_window}}
+    \Comment{$\beta$-informed placement of missing prefill tokens within the prefill window via request-level attribution and last-step window; §\ref{sec:beta_informed_prefill_correction}, Eq.~\eqref{eq:qr_def_m}--Eq.~\eqref{eq:last_step_window_m}}
   \EndFor
 
   \For{each phase instance $i$}
     \State compute step-averaged prefill and decode pressures
-    \Comment{step-averaged (i.e., step-weighted) pressures from \emph{instantaneous} pressures and phase-level attribution; §\ref{sec:step_averaged_pressures}, Eq.~\eqref{eq:step_averaged_pressures}}
+    \Comment{step-averaged (i.e., step-weighted) pressures from \emph{instantaneous} pressures and phase-level attribution; §\ref{sec:step_averaged_pressures}, Eq.~\eqref{eq:step_averaged_pressures_m}}
   \EndFor
 
   \State refit $\beta$ using frozen features
-  \Comment{NNLS on step-weighted exposures $N_i\bar p_i^{\mathrm{pf}}$ and $N_i\bar p_i^{\mathrm{dec}}$ (tokens), holding attribution fixed; §\ref{sec:step_density}, Eq.~\eqref{eq:sr_nnls}}
+  \Comment{NNLS on step-weighted exposures $N_i\bar p_i^{\mathrm{pf}}$ and $N_i\bar p_i^{\mathrm{dec}}$ (tokens), holding attribution fixed; §\ref{sec:step_density}, Eq.~\eqref{eq:sr_nnls_m}}
 
 \Until{change in $\beta$ is below $\epsilon$}
 
@@ -703,144 +741,139 @@ prefill partial chunk using the inferred step-density model.
 
 
 
-\subsubsection{Local Step-Time Model and Step Density}
+\subsubsection{Local Step-Time Model and Step Density (Iteration-Indexed)}
+\label{sec:local_step_density}
 
-Given instantaneous pressures, we model the (latent) step duration at time $t$ as
+The iterative estimator proceeds in outer iterations indexed by $m$.
+At iteration $m$, we treat the current coefficient vector $\beta^{(m)}$
+as fixed and construct a trace-only step-density proxy on the trace-induced
+time grid. All attribution quantities computed from this proxy (e.g.,
+$q_i^{(m)}$, $q_r^{(m)}$, $\mathcal{W}_r^{(m)}$, $c^{(m)}$, and
+$\bar p_i^{(\cdot),(m)}$) are then held fixed while solving for $\beta^{(m+1)}$
+via an NNLS subproblem.
+
+Given instantaneous pressures, define the iteration-$m$ local step-time model
 \begin{equation}
-\Delta(t;\beta)
+\Delta^{(m)}(t)
 =
-\beta_0
+\beta^{(m)}_0
 +
-\beta_1\,\tilde p^{\mathrm{pf}}(t;\beta)
+\beta^{(m)}_1\,\tilde p^{\mathrm{pf},(m)}(t)
 +
-\beta_2\,p^{\mathrm{dec}}(t),
-\qquad \Delta(t;\beta) > 0.
-\label{eq:local_step_time}
+\beta^{(m)}_2\,p^{\mathrm{dec}}(t),
+\qquad \Delta^{(m)}(t) > 0.
+\label{eq:local_step_time_m}
 \end{equation}
-In the iterative estimator, the effective prefill pressure
-$\tilde p^{\mathrm{pf}}(t;\beta)$ depends on $\beta$ through the
-$\beta$-informed partial-chunk correction; in the baseline,
-$\tilde p^{\mathrm{pf}}(t)$ is fixed. Thus, $\Delta(t;\beta)$ 
-represents the instantaneous duration of a busy-loop
-step that would be executed at time $t$ given the token pressures observed 
-at that moment and execution coefficients $\beta$.
-
-The corresponding step density is
+The induced \emph{step density} (steps/sec) is
 \begin{equation}
-\lambda(t;\beta) = \frac{1}{\Delta(t;\beta)}.
-\label{eq:step_density}
+\lambda^{(m)}(t) = \frac{1}{\Delta^{(m)}(t)}.
+\label{eq:step_density_m}
 \end{equation}
 
-The same step-density model will also be used to localize prefill
-partial-chunk mass within each prefill window in a trace-only manner.
+This iteration-indexing eliminates circularity: $\lambda^{(m)}$ is computed
+from $\beta^{(m)}$ and iteration-$m$ effective pressures, and is not defined
+implicitly in terms of itself.
 
 
 % ============================================================
-\subsubsection{$\beta$-Informed Partial-Chunk Correction}
+\subsubsection{$\beta$-Informed Partial-Chunk Correction (Iteration-Indexed)}
 \label{sec:beta_informed_prefill_correction}
 
 Uniform and end-localized corrections treat the temporal location of the final
-(prefill) partial chunk as exogenous. In contrast, our iterative estimator can
-\emph{infer a trace-only proxy for step timing} from the current coefficient
-iterate $\beta^{(m)}$ and use it to place the missing prefill token mass
-$\mu_r$ near the \emph{latent final prefill step}. This coupling is the key
-differentiator of the step-density reweighted procedure.
+(prefill) partial chunk as exogenous. In contrast, our iterative estimator
+uses the current iterate $\beta^{(m)}$ to construct a trace-only step-density
+proxy $\lambda^{(m)}(t)$ and uses it to place the missing prefill token mass
+$\mu_r$ near the \emph{latent final prefill step}.
 
 \paragraph{Step-time attribution density.}
-Using $\lambda(t;\beta)$ from Eq.~\eqref{eq:step_density}, define the normalized
-density over request $r$'s prefill window as follows.
+Using $\lambda^{(m)}(t)$ from Eq.~\eqref{eq:step_density_m}, define the normalized
+density over request $r$'s prefill window:
 \begin{equation}
-q_r(t;\beta)
+q_r^{(m)}(t)
 =
-\frac{\lambda(t;\beta)}{\int_{t_{r,s}}^{t_{r,e}} \lambda(u;\beta)\,du},
+\frac{\lambda^{(m)}(t)}{\int_{t_{r,s}}^{t_{r,e}} \lambda^{(m)}(u)\,du},
 \qquad
-\int_{t_{r,s}}^{t_{r,e}} q_r(t;\beta)\,dt = 1.
-\label{eq:qr_def}
+\int_{t_{r,s}}^{t_{r,e}} q_r^{(m)}(t)\,dt = 1.
+\label{eq:qr_def_m}
 \end{equation}
-We emphasize that at iteration $m$, the step-density $\lambda(t;\beta^{(m)})$ is held fixed while 
-forming $q_r(\cdot;\beta^{(m)})$; we interpret $q_r(\cdot;\beta^{(m)})$
-as a \emph{trace-only step-time attribution model} within the prefill window.
+We interpret $q_r^{(m)}$ as a \emph{trace-only step-time attribution model}
+within the prefill window, computed from $\beta^{(m)}$ and held fixed during
+the NNLS update for $\beta^{(m+1)}$.
 
-
-\paragraph{Last-step window under $q_r$.}
+\paragraph{Last-step window under $q_r^{(m)}$.}
 Let $N_r=\lceil P_r/C\rceil$ be the inferred number of prefill steps and
 $\mu_r = C-\rho_r \in [0,C)$ be the missing token mass of the final partial
-chunk (Eq.~\eqref{eq:rho_def}).
-Define the $q_r$-CDF
+chunk (Eq.~\eqref{eq:rho_def}). Define the $q_r^{(m)}$-CDF
 \begin{equation}
-F_r(t;\beta)=\int_{t_{r,s}}^{t} q_r(u;\beta)\,du,
-\label{eq:Fr_def}
+F_r^{(m)}(t)=\int_{t_{r,s}}^{t} q_r^{(m)}(u)\,du,
+\label{eq:Fr_def_m}
 \end{equation}
-and the \emph{last-step window} as the final $1/N_r$ fraction of step exposure:
+and define the \emph{last-step window} as the final $1/N_r$ fraction of step exposure:
 \begin{equation}
-\mathcal{W}_r(\beta)
+\mathcal{W}_r^{(m)}
 =
 \Bigl\{
 t\in[t_{r,s},t_{r,e})
 :
-F_r(t;\beta)\ge 1-\tfrac{1}{N_r}
+F_r^{(m)}(t)\ge 1-\tfrac{1}{N_r}
 \Bigr\}.
-\label{eq:last_step_window}
+\label{eq:last_step_window_m}
 \end{equation}
-Intuitively, $\mathcal{W}_r(\beta)$ is the region in wall-clock time where the
-final prefill step is most plausible given the current step-density model.
 
-\paragraph{$\beta$-informed correction weight.}
-We concentrate the missing mass $\mu_r$ on $\mathcal{W}_r(\beta)$, proportional
-to the step-time attribution:
+\paragraph{Iteration-$m$ correction signal and induced effective pressure.}
+We concentrate the missing token mass $\mu_r$ on $\mathcal{W}_r^{(m)}$
+proportional to $q_r^{(m)}(t)$, expressed as a \emph{correction signal}
+(tokens/second) whose time integral equals $\mu_r$.
+
+Define the per-request correction signal
 \begin{equation}
-w_r(t;\beta)
+c_r^{(m)}(t)
 =
-\frac{q_r(t;\beta)\,\mathbf{1}\{t\in\mathcal{W}_r(\beta)\}}
-{\int_{\mathcal{W}_r(\beta)} q_r(u;\beta)\,du},
+\mu_r\,
+\frac{q_r^{(m)}(t)\,\mathbf{1}\{t\in\mathcal{W}_r^{(m)}\}}
+{\int_{\mathcal{W}_r^{(m)}} q_r^{(m)}(u)\,du},
 \qquad
-\int w_r(t;\beta)\,dt = 1.
-\label{eq:wr_beta_informed}
+\text{units: tokens/second},
+\label{eq:cr_beta_informed_m}
 \end{equation}
-The effective prefill pressure used by the iterative estimator is then
+and the aggregate correction $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$.
+By construction, $\int c_r^{(m)}(t)\,dt=\mu_r$.
+
+To use this correction inside the local step-time model (Eq.~\eqref{eq:local_step_time_m}),
+convert the time-based correction signal into a tokens/step decrement by dividing by
+the iteration-$m$ step density $\lambda^{(m)}(t)$:
 \begin{equation}
-\tilde p^{\mathrm{pf}}(t;\beta)
+\tilde p^{\mathrm{pf},(m)}(t)
 =
 p^{\mathrm{pf}}_{\mathrm{full}}(t)
 -
-\sum_r \mu_r\, w_r(t;\beta).
-\label{eq:prefill_pressure_beta_informed}
+\frac{c^{(m)}(t)}{\lambda^{(m)}(t)}.
+\label{eq:prefill_pressure_beta_informed_m}
 \end{equation}
-This preserves total prefill token mass exactly and uses $\beta$ only to place
-the missing-token mass \emph{within} each request's trace-visible prefill interval.
+Since $c^{(m)}(t)/\lambda^{(m)}(t)$ has units
+$(\text{tokens}/\text{second})/(\text{steps}/\text{second})=\text{tokens}/\text{step}$,
+$\tilde p^{\mathrm{pf},(m)}(t)$ remains a tokens/step pressure.
 
 \paragraph{Trace-only implementation (integrals over a grid).}
-As in the baseline, all quantities above enter only through integrals over the trace-induced grid
-$\{[g_j,g_{j+1})\}$, on which $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and $p^{\mathrm{dec}}(t)$ are piecewise-constant
-(and hence $\lambda(t;\beta)$ is also piecewise-constant).
+All quantities above enter only through integrals over the trace-induced grid
+$\{[g_j,g_{j+1})\}$, on which pressures (and hence $\lambda^{(m)}$) are piecewise-constant.
 
 
-\paragraph{Connection to the iterative NNLS update.}
-At iteration $m$, we use $\beta^{(m)}$ to form $\tilde p^{\mathrm{pf}}(t;\beta^{(m)})$
-via Eq.~\eqref{eq:prefill_pressure_beta_informed}, then compute step-averaged
-pressures $\bar p^{\mathrm{pf}}_i(\beta^{(m)})$ and
-$\bar p^{\mathrm{dec}}_i(\beta^{(m)})$ (Eq.~\eqref{eq:step_averaged_pressures}),
-and finally solve the frozen-feature NNLS subproblem (Eq.~\eqref{eq:sr_nnls}).
-Thus, $\beta$ is refined jointly with a $\beta$-informed, trace-only placement
-of prefill partial-chunk mass, yielding a substantially more step-faithful
-calibration than any fixed (non-iterative) correction.
+\subsubsection{Normalized Step Density within a Phase (Iteration-Indexed)}
 
-
-\subsubsection{Normalized Step Density within a Phase}
-
-For phase instance $i$, define
+For phase instance $i$, define the iteration-$m$ phase mass
 \[
-\Lambda_i(\beta)
+\Lambda_i^{(m)}
 =
-\int_{t_{i,s}}^{t_{i,e}} \lambda(t;\beta)\,dt,
+\int_{t_{i,s}}^{t_{i,e}} \lambda^{(m)}(t)\,dt,
 \qquad
-q_i(t;\beta)
+q_i^{(m)}(t)
 =
-\frac{\lambda(t;\beta)}{\Lambda_i(\beta)}.
+\frac{\lambda^{(m)}(t)}{\Lambda_i^{(m)}}.
 \]
-By construction, $\int q_i(t;\beta)\,dt = 1$.
-We treat $N_i$ as fixed and use $q_i(t;\beta)$ as a trace-only 
-step-time attribution model within the phase window.
+By construction, $\int_{t_{i,s}}^{t_{i,e}} q_i^{(m)}(t)\,dt = 1$.
+We treat $q_i^{(m)}$ as a trace-only step-time attribution model within the
+phase window, computed from $\beta^{(m)}$ and held fixed during the NNLS update.
 
 \subsubsection{Step-Weighted Exposures}
 \label{sec:step_averaged_pressures}
@@ -850,29 +883,38 @@ token per step, so the trace-inferred step count equals the token count and all
 decode work is fully accounted for by $p^{\mathrm{dec}}(t)$. For a prefill phase, 
 define
 \begin{equation}
-\bar p^{\mathrm{pf}}_i(\beta)
+\bar p^{\mathrm{pf},(m)}_i
 =
-\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t;\beta)\, q_i(t;\beta)\,dt,
+\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf},(m)}(t)\, q_i^{(m)}(t)\,dt,
 \qquad
-\bar p^{\mathrm{dec}}_i(\beta)
+\bar p^{\mathrm{dec},(m)}_i
 =
-\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i(t;\beta)\,dt.
-\label{eq:step_averaged_pressures}
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i^{(m)}(t)\,dt.
+\label{eq:step_averaged_pressures_m}
 \end{equation}
 
+
 \paragraph{From step-averaged pressure to exposure.}
-The quantities $\bar p_i^{\mathrm{pf}}(\beta)$ and $\bar p_i^{\mathrm{dec}}(\beta)$
-remain \emph{step-averaged pressures} (tokens/step). The corresponding
-\emph{step-weighted exposures} used by the regression are obtained by multiplying
-by the trace-inferred step count: $N_i\bar p_i^{\mathrm{pf}}(\beta)$ and
-$N_i\bar p_i^{\mathrm{dec}}(\beta)$ (tokens).
+The quantities $\bar p_i^{\mathrm{pf},(m)}$ and $\bar p_i^{\mathrm{dec},(m)}$
+are \emph{step-averaged pressures} (tokens/step), obtained by averaging
+instantaneous pressures with respect to the iteration-$m$ step-time attribution
+$q_i^{(m)}(t)$.
+The corresponding \emph{step-weighted exposures} used in the NNLS subproblem are
+$N_i\bar p_i^{\mathrm{pf},(m)}$ and $N_i\bar p_i^{\mathrm{dec},(m)}$ (tokens).
 
+In the special case where $\lambda^{(m)}(t)$ is approximately constant over
+$[t_{i,s},t_{i,e})$, the step-time attribution is approximately uniform and the
+resulting step-weighted exposures reduce to the baseline construction (up to
+numerical integration error).
 
-Note that $\bar p_i^{\mathrm{pf}}(\beta)$ retains units of tokens/step, so
-$N_i\bar p_i^{\mathrm{pf}}(\beta)$ is an \emph{effective step-aggregated prefill exposure}
-for phase $i$ under the step-timing model $\lambda(t;\beta)$.
-In the special case of approximately uniform step density within the phase,
-this reduces to the baseline exposure $A_i^{\mathrm{pf}}$ (up to numerical integration error).
+\paragraph{Units and interpretation.}
+$\bar p_i^{\mathrm{pf},(m)}$ and $\bar p_i^{\mathrm{dec},(m)}$ have units of tokens/step,
+so $N_i\bar p_i^{\mathrm{pf},(m)}$ and $N_i\bar p_i^{\mathrm{dec},(m)}$ are step-aggregated
+token exposures (tokens) for phase $i$ under the iteration-$m$ attribution induced by
+$\lambda^{(m)}(t)$.
+If $\lambda^{(m)}(t)$ is approximately constant over $[t_{i,s},t_{i,e})$, then
+$q_i^{(m)}(t)$ is approximately uniform and these step-weighted exposures reduce to the
+baseline construction (up to numerical integration error and any chosen prefill correction).
 
 
 \subsubsection{MM-Style Iterative NNLS}
@@ -888,29 +930,32 @@ quantities, and solve
 \left(
 N_i\beta_0
 +
-N_i\bar p^{\mathrm{pf}}_i(\beta^{(m)})\beta_1
+\bigl[N_i\bar p^{\mathrm{pf},(m)}_i\bigr]\beta_1
 +
-N_i\bar p^{\mathrm{dec}}_i(\beta^{(m)})\beta_2
+\bigl[N_i\bar p^{\mathrm{dec},(m)}_i\bigr]\beta_2
 -
 \ell_i
-\right)^2 .
-\label{eq:sr_nnls}
+\right)^2 ,
+\label{eq:sr_nnls_m}
 \end{equation}
+where $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ are computed from
+$\beta^{(m)}$ via Eqs.~\eqref{eq:local_step_time_m}--\eqref{eq:step_averaged_pressures_m}
+and are held fixed while optimizing over $\beta$.
+
 Optional damping
 $\beta^{(m+1)} \leftarrow (1-\eta)\beta^{(m)} + \eta\beta^{(m+1)}$
 improves numerical stability. 
 We iterate until $\|\beta^{(m+1)} - \beta^{(m)}\|_2 < \epsilon$ or a maximum
-iteration count is reached.
+iteration count is reached. 
 
-% ============================================================
-\subsection{Robust Estimation and Fixed-Point View}
-\label{sec:robust_fixed_point}
-
-To mitigate outliers, we optionally replace the squared loss with a Huber loss
-$\rho_\delta$.
-The resulting mapping defines a fixed-point iteration
-$\beta^{(m+1)}=\mathcal{F}(\beta^{(m)})$, terminated by relative change or a
-fixed iteration budget.
+\paragraph{Robust loss and fixed-point view.}
+To mitigate outliers, we optionally replace the squared loss in
+Eq.~\eqref{eq:sr_nnls_m} with a Huber loss $\rho_\delta$ applied to each residual.
+With this modification, each iteration still forms trace-derived features using
+$\beta^{(m)}$ and then solves a convex subproblem with those features held fixed,
+yielding an update of the form $\beta^{(m+1)}=\mathcal{F}(\beta^{(m)})$.
+We terminate when $\|\beta^{(m+1)}-\beta^{(m)}\|_2<\epsilon$ (or relative change)
+or after a fixed iteration budget.
 
 % ============================================================
 \subsection{Limitations and Scope}
@@ -927,97 +972,6 @@ path to step-level calibration using only production traces.
 \paragraph{Simulator linkage.}
 The estimated coefficients $\beta^\star$ are used directly in the step-time
 model (Eq.~\eqref{eq:step_model}) of the discrete-event simulator.
-
-
-% ============================================================
-\subsection{Design of Inference Workloads for Calibration}
-\label{sec:workload_design}
-
-Identifiability of step-level execution coefficients requires sufficient
-variation in instantaneous token pressures.
-Highly homogeneous workloads may yield nearly collinear features, limiting
-estimation precision even with large trace volumes.
-We therefore explicitly design inference workloads that \emph{excite}
-distinct execution regimes during calibration windows.
-
-\subsubsection{Calibration Probes}
-
-We construct a small set of \emph{calibration probes}, each defined by a
-controlled combination of:
-\begin{itemize}
-  \item request arrival rate and burstiness,
-  \item input length distribution,
-  \item prefix hit distribution,
-  \item decode length distribution,
-  \item maximum concurrency or batch limits.
-\end{itemize}
-
-These probes are executed using standard benchmarking or workload-generation
-frameworks and produce ordinary production traces. No engine instrumentation,
-step timing, or internal counters are used.
-
-\subsubsection{Feature Diversity Objective}
-
-Let $\phi_i(\beta)$ denote the step-resolved feature vector for phase $i$:
-\[
-\phi_i(\beta)
-=
-\left(
-N_i,\;
-N_i\bar p^{\mathrm{pf}}_i(\beta),\;
-N_i\bar p^{\mathrm{dec}}_i(\beta)
-\right).
-\]
-
-Calibration probes are selected to maximize diversity among these features
-across phases, reducing collinearity between prefill, decode, and step-count
-terms. In practice, this can be achieved by:
-\begin{itemize}
-  \item mixing prefill-heavy and decode-heavy workloads,
-  \item varying concurrency independently of token lengths,
-  \item introducing controlled arrival-rate ramps or bursts.
-\end{itemize}
-
-\subsubsection{Design-of-Experiments Perspective}
-
-From a design-of-experiments viewpoint, probe selection aims to improve the
-conditioning of the regression problem.
-Simple heuristics include:
-\begin{itemize}
-  \item maximizing the determinant or minimizing the condition number of the
-        empirical feature covariance matrix,
-  \item ensuring coverage of distinct operating regimes
-        (e.g., low-load vs.\ saturation).
-\end{itemize}
-
-These criteria are evaluated using trace-derived features only and do not
-require knowledge of the true execution coefficients. These criteria 
-depend only on aggregate variation in step-level feature magnitudes and 
-are insensitive to the specific treatment of partial prefill
-chunks, which affects only localized exposure attribution within phases.
-
-\paragraph{Separation of Concerns.}
-Workload generators and benchmarking frameworks are used solely to induce
-pressure variability during calibration. Estimation of step-level execution
-coefficients relies exclusively on trace-visible phase timing and token
-counts, preserving the trace-only and non-intrusive nature of the method.
-
-% ============================================================
-\subsection{Justification and Scope}
-\label{sec:extended_justification}
-
-Robust loss functions address unavoidable noise and outliers in production
-traces without altering the underlying execution model.
-The fixed-point formulation clarifies how step-density reweighting reconciles
-time-based observations with step-based costs.
-Finally, explicit workload design ensures that the estimation problem is
-well-conditioned by construction, rather than relying on incidental workload
-variation.
-
-Together, these extensions strengthen the estimator’s practical reliability
-and interpretability while preserving its central property: step-level
-execution coefficients are inferred using only trace-visible information,
-without engine instrumentation or per-step timing.
 
 
 \end{document}

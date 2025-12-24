@@ -5,48 +5,59 @@ baseline_step_betas.py
 Baseline trace-only estimator for step-level execution coefficients (betas)
 for a vLLM-style inference engine.
 
-This file implements the *baseline* estimator described in the paper section
-"Baseline: Time-Integrated NNLS Estimation" (Eq. (baseline_nnls)):
+Implements the *baseline* estimator in the paper section
+"Baseline: Time-Integrated NNLS Estimation" (Eq. (baseline_nnls)).
 
-High-level pipeline
--------------------
-Given a trace of *phase instances* (one row per prefill/decode phase):
+High-level pipeline (paper-consistent)
+--------------------------------------
+Given a trace of *phase instances* (one row per phase instance i, where i is
+either the prefill phase or decode phase of a request r_i):
+
   1) Validate/normalize schema and timestamps.
   2) Infer trace-level step counts N_i (if not already provided).
-  3) Compute phase-local step density proxy λ̂_i = N_i / T_i (Eq. (baseline_lambda_hat)).
-  4) Reconstruct time-varying token pressures from overlap (Eq. (pressures)):
+       - Decode: N_i = D_{r_i}  (1 token/step)
+       - Prefill: N_i = ceil(P_{r_i} / C)
+  3) Compute phase-local step-density proxy λ̂_i = N_i / ℓ_i
+     (Eq. (baseline_lambda_hat)), where ℓ_i is the observed phase duration.
+     NOTE: in code, ℓ_i is stored as df["T_i"].
+  4) Reconstruct time-varying token pressures from overlap on the trace-induced grid:
        - p_pf_full(t) = C * (# active prefill phases at t)   [tokens/step]
        - p_dec(t)     =      (# active decode phases at t)   [tokens/step]
+     Under the decode semantics (1 token/request/step), p_dec(t) equals the
+     number of concurrently active decode phases.
   5) Apply partial-chunk correction for prefill chunking (mode: end/uniform/none):
-       - subtract missing prefill mass μ_r in integrated form (tokens), not per-step.
-  6) Form baseline integrated exposures (Eq. (baseline_integrated_exposures)):
+       - subtract missing prefill mass μ_r in *integrated form* (tokens),
+         implemented via a correction signal c(t) (tokens/sec).
+         NOTE: in code, c(t) is represented by corr_rate (tokens/sec).
+  6) Form baseline integrated exposures (paper Eq. (baseline_integrated_exposures)):
        - A_pf_i  [tokens]
        - A_dec_i [tokens]
-  7) Fit NNLS (via sklearn LinearRegression(positive=True), no intercept) (Eq. (baseline_nnls)):
-       T_i ≈ β0*N_i + β1*A_pf_i + β2*A_dec_i
+  7) Fit NNLS (sklearn LinearRegression(positive=True), no intercept) (Eq. (baseline_nnls)):
+       ℓ_i ≈ β0*N_i + β1*A_pf_i + β2*A_dec_i
+     NOTE: in code, ℓ_i is stored as df["T_i"].
 
-IMPORTANT invariants
---------------------
+IMPORTANT invariants (trace-only)
+---------------------------------
 - This is a trace-only estimator: it never uses per-step timing or step boundaries.
 - The simulator later consumes only β = (β0, β1, β2); it generates its own step-level
   token counts and KV dynamics. No trace timing is embedded into the simulator.
 
-Notation bridge to paper
-------------------------
-- Phase i:
+Notation bridge to the paper
+----------------------------
+- Phase instance i (prefill or decode of request r_i):
     t_{i,s}, t_{i,e}  -> df[t_start_col], df[t_end_col]
-    T_i               -> df["T_i"]
-    N_i               -> df["N_i"]
-    λ̂_i              -> df["lambda_hat"]
-    A_pf_i, A_dec_i   -> df["A_pf_i"], df["A_dec_i"]
+    ℓ_i               -> df["T_i"]              (observed duration in seconds)
+    N_i               -> df["N_i"]              (trace-inferred step count)
+    λ̂_i              -> df["lambda_hat"]       (steps/sec)
+    A_pf_i, A_dec_i   -> df["A_pf_i"], df["A_dec_i"] (tokens)
 - Chunk size:
     C                 -> chunk_size
 - Pressures:
     p_pf_full(t)      -> p_pf_full (piecewise-constant over time-grid segments)
     p_dec(t)          -> p_dec
-- Partial-chunk correction (mode-dependent):
-    corr_rate(t)      -> corr_rate  (tokens/second over segments)
-    ∫ corr_rate dt    -> corr_tokens (tokens)
+- Partial-chunk correction:
+    c(t)              -> corr_rate (tokens/sec over segments)
+    ∫ c(t) dt         -> corr_tokens (tokens)
 
 Shapes convention
 -----------------
@@ -60,8 +71,8 @@ Then:
   grid                  : (M,) float64
   n_pf, n_dec            : (S,) int64
   p_pf_full, p_dec       : (S,) float64   (tokens/step)
-  corr_rate              : (S,) float64   (tokens/second)
-  I_pf_full, I_dec       : (M,) float64   (integrals over time; see docs below)
+  corr_rate              : (S,) float64   (tokens/second)  [paper: c(t)]
+  I_pf_full, I_dec       : (M,) float64
   I_corr                 : (M,) float64
   A_pf, A_dec            : (n,) float64   (tokens)
 
@@ -69,6 +80,7 @@ Dependencies
 ------------
 pip install numpy pandas scikit-learn
 """
+
 
 from __future__ import annotations
 
@@ -419,25 +431,32 @@ def _infer_or_read_step_counts(
     """
     Ensure trace-inferred step counts N_i exist and are integer-valued.
 
-    Paper mapping (Problem Setup):
-      - For decode phases: N_i = number of decode tokens (1 token/step).
-      - For prefill with chunk size C: N_i = ceil(P_i / C).
+    Paper mapping (Problem Setup)
+    -----------------------------
+    Each row is a *phase instance* i (prefill or decode) of a request r_i.
+
+    - Decode phase instance i:
+        N_i = D_{r_i}
+      because decode generates 1 token per busy-loop step.
+
+    - Prefill phase instance i (chunk size C):
+        N_i = ceil(P_{r_i} / C)
 
     Inputs
     ------
     df : pd.DataFrame, shape (n, ...)
         Must contain phase_type_col.
         If n_steps_col is missing, must also contain:
-          - prefill_tokens_col (prefill token count P_i, used only for prefill)
-          - decode_tokens_col (decode token count, used only for decode)
+          - prefill_tokens_col : interpreted as P_{r_i} for prefill rows
+          - decode_tokens_col  : interpreted as D_{r_i} for decode rows
     chunk_size : int
         Prefill chunk size C (tokens per prefill step), C > 0.
     phase_type_col : str
         Column name for phase type ("prefill" or "decode").
     prefill_tokens_col : str
-        Column name for P_i.
+        Column name storing P_{r_i} on prefill rows.
     decode_tokens_col : str
-        Column name for decode token count.
+        Column name storing D_{r_i} on decode rows.
     n_steps_col : str
         Column name for step count N_i (optional input; inferred if missing).
 
@@ -451,7 +470,9 @@ def _infer_or_read_step_counts(
 
     Notes
     -----
-    The estimator uses N_i as a *known* regressor and as the numerator of λ̂_i = N_i/T_i.
+    The estimator treats N_i as known:
+      - it is a regressor in the baseline NNLS objective, and
+      - it is used to form λ̂_i = N_i / ℓ_i (Eq. (baseline_lambda_hat)).
     """
     if n_steps_col not in df.columns:
         _require_columns(df, [prefill_tokens_col, decode_tokens_col])
@@ -483,11 +504,17 @@ def _compute_durations_and_lambda_hat(
     min_duration_sec: float,
 ) -> pd.DataFrame:
     """
-    Compute per-phase observed duration T_i and phase-local step density proxy λ̂_i.
+    Compute observed phase duration and phase-local step-density proxy λ̂_i.
 
-    Paper mapping:
-      - T_i = t_{i,e} - t_{i,s}
-      - λ̂_i = N_i / T_i  (Eq. (baseline_lambda_hat))  [steps/second]
+    Paper mapping
+    -------------
+    For a phase instance i with trace-visible boundaries:
+      - ℓ_i = t_{i,e} - t_{i,s}     (seconds)
+      - λ̂_i = N_i / ℓ_i           (steps/sec), Eq. (baseline_lambda_hat)
+
+    Code naming note (important)
+    ----------------------------
+    The paper denotes duration by ℓ_i. This implementation stores ℓ_i as df["T_i"].
 
     Inputs
     ------
@@ -496,22 +523,25 @@ def _compute_durations_and_lambda_hat(
           - df["N_i"] (steps, shape (n,))
           - t_start_col, t_end_col (seconds)
     min_duration_sec : float
-        Optional clamp applied to each duration when forming λ̂_i.
-        If > 0: T_i := max(T_i, min_duration_sec).
-        If == 0: paper-faithful behavior (just require T_i > 0).
+        Optional clamp applied to ℓ_i when forming λ̂_i:
+          ℓ_i := max(ℓ_i, min_duration_sec)
+        This corresponds to the implementation footnote-style safeguard mentioned
+        in the paper text (to avoid extreme λ̂_i when durations are extremely small).
+        Set to 0.0 for the paper-faithful definition.
 
     Outputs
     -------
     df : pd.DataFrame, shape (n, ...)
         Adds:
-          - df["T_i"]        : float64, shape (n,), seconds
-          - df["lambda_hat"] : float64, shape (n,), steps/second
+          - df["T_i"]        : ℓ_i, seconds
+          - df["lambda_hat"] : λ̂_i, steps/second
 
     Raises
     ------
     ValueError
-        If any resulting T_i <= 0.
+        If any resulting durations are non-positive.
     """
+
     T = (df[t_end_col] - df[t_start_col]).to_numpy(dtype=np.float64)
     if min_duration_sec > 0:
         T = np.maximum(T, float(min_duration_sec))
@@ -613,16 +643,24 @@ def _reconstruct_pressures(
     """
     Reconstruct piecewise-constant token pressures from phase overlap.
 
-    Paper mapping (Trace-derived token pressures):
-      - p_pf_full(t) = C * (# active prefill phases at t)
-      - p_dec(t)     =      (# active decode phases at t)
+    Paper mapping (Trace-derived token pressures)
+    ---------------------------------------------
+    Pressures are defined in units of tokens/step on the trace-induced time grid.
+
+    - Prefill (naive full-chunk pressure):
+        p_pf_full(t) = C * (# active prefill phase instances at time t)
+      where C is the prefill chunk size (tokens per prefill step).
+
+    - Decode:
+        Under decode semantics (1 token/request/step),
+        p_dec(t) = (# active decode phase instances at time t).
 
     Inputs
     ------
     df : pd.DataFrame, shape (n, ...)
         Must contain phase_type_col with values "prefill"/"decode".
     grid : np.ndarray, shape (M,)
-        Global time grid.
+        Global time grid (sorted unique phase boundaries).
     starts : np.ndarray, shape (n,)
         Phase start times aligned with df rows.
     ends : np.ndarray, shape (n,)
@@ -635,10 +673,9 @@ def _reconstruct_pressures(
     Outputs
     -------
     p_pf_full : np.ndarray, shape (S=M-1,), float64
-        Prefill pressure per segment, units: tokens/step.
+        p_pf_full(t) on each grid segment, units: tokens/step.
     p_dec : np.ndarray, shape (S=M-1,), float64
-        Decode pressure per segment, units: tokens/step.
-        (Decode is 1 token/step per active decode request.)
+        p_dec(t) on each grid segment, units: tokens/step.
     I_pf_full : np.ndarray, shape (M,), float64
         Prefix integral of p_pf_full over time:
           I_pf_full[k] = ∫_{grid[0]}^{grid[k]} p_pf_full(t) dt
@@ -648,9 +685,11 @@ def _reconstruct_pressures(
 
     Notes
     -----
-    These pressures are expressed per step (tokens/step), not per unit time.
-    This is why later we multiply time-integrals by λ̂_i (steps/second) to get tokens.
+    These pressures are *per step* (tokens/step), not per unit time.
+    In the baseline, time-integrals of pressures are converted into token exposures
+    by multiplying by the phase-local step-density proxy λ̂_i (steps/sec).
     """
+
     pre_mask = df[phase_type_col].eq("prefill").to_numpy()
     dec_mask = df[phase_type_col].eq("decode").to_numpy()
 
@@ -678,59 +717,59 @@ def _build_uniform_partial_chunk_correction_rate(
     n_steps_col: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Build the baseline's *uniform redistribution* partial-chunk correction signal.
+    Build the baseline *uniform redistribution* prefill partial-chunk correction signal c(t).
 
-    Paper mapping (Prefill chunking and partial-chunk correction):
-      - For each prefill request r:
-          N_r = ceil(P_r / C)
-          ρ_r = P_r - C*(N_r-1)  in (0, C]
-          μ_r = C - ρ_r          in [0, C)
-      - Under uniform redistribution over the prefill interval [rs, re):
-          corr_rate_r(t) = μ_r / (re - rs)  [tokens/second] on [rs, re)
+    Paper mapping (Prefill chunking and correction)
+    -----------------------------------------------
+    For each request r with prefill tokens P_r and inferred prefill steps N_r:
+      ρ_r = P_r - C*(N_r - 1)      in (0, C]
+      μ_r = C - ρ_r                in [0, C)
+
+    Uniform redistribution assumes the missing mass μ_r is spread uniformly over
+    the trace-visible prefill interval [t_{r,s}, t_{r,e}):
+
+      c_r(t) = μ_r / (t_{r,e} - t_{r,s})  on [t_{r,s}, t_{r,e})      [tokens/sec]
+      c(t)   = Σ_r c_r(t)
+
+    Code naming note (important)
+    ----------------------------
+    The paper denotes the correction signal by c(t) (tokens/sec).
+    This implementation returns it as corr_rate (tokens/sec).
 
     The estimator uses the correction only through integrated form:
-        corr_tokens(a,b) = ∫_a^b corr_rate(t) dt  [tokens]
+      ∫ c(t) dt  (tokens)
 
     Inputs
     ------
-    df : pd.DataFrame, shape (n, ...)
+    df : pd.DataFrame
         Full phase table; used for column presence checks.
     grid : np.ndarray, shape (M,)
         Global time grid.
     chunk_size : int
         C, tokens per prefill step.
-    prefill_df : pd.DataFrame, shape (n_pf, ...)
+    prefill_df : pd.DataFrame
         Prefill-only subset (one row per request, enforced by caller).
-        Must contain:
-          - t_start_col, t_end_col
-          - prefill_tokens_col (P_r)
-          - n_steps_col (N_r)
-    t_start_col, t_end_col : str
-        Column names for prefill interval boundaries.
-    prefill_tokens_col : str
-        Column name for number of prefill tokens P_r.
-    n_steps_col : str
-        Column name for inferred prefill steps N_r.
+        Interprets:
+          - prefill_tokens_col as P_r
+          - n_steps_col as N_r
+          - [t_start_col, t_end_col) as [t_{r,s}, t_{r,e})
 
     Outputs
     -------
     corr_rate : np.ndarray, shape (S=M-1,), float64
-        Aggregate correction rate over all active prefill requests:
-          corr_rate[j] = sum_r μ_r/(re-rs) for requests active on segment j
-        units: tokens/second.
+        Aggregate correction signal c(t) on each segment, units: tokens/second.
     I_corr : np.ndarray, shape (M,), float64
-        Prefix integral of corr_rate over time:
-          I_corr[k] = ∫_{grid[0]}^{grid[k]} corr_rate(t) dt
-        units: tokens.
+        Prefix integral of corr_rate over time, units: tokens.
 
-    Notes on why units differ
-    -------------------------
-    - p_pf_full is tokens/step, so ∫ p_pf_full dt is (tokens/step)*seconds.
-    - corr_rate is tokens/second, so ∫ corr_rate dt is tokens.
+    Unit reminder (critical)
+    ------------------------
+    - p_pf_full is tokens/step ⇒ ∫ p_pf_full dt has units (tokens/step)*sec
+    - c(t) is tokens/sec     ⇒ ∫ c(t) dt has units tokens
 
-    In the exposure computation, corr_tokens must be subtracted directly from A_pf_i
-    (which is also tokens). It must NOT be multiplied by λ̂_i.
+    In the exposure computation A_pf_i, the integrated correction (tokens) is
+    subtracted directly and MUST NOT be multiplied by λ̂_i.
     """
+
     corr_rate = np.zeros(grid.size - 1, dtype=np.float64)
 
     if prefill_df.empty:
@@ -778,78 +817,50 @@ def _build_end_partial_chunk_correction_rate(
     n_steps_col: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Build the baseline's *end-localized* partial-chunk correction signal.
+    Build the baseline *end-localized* prefill partial-chunk correction signal c(t).
 
-    Paper mapping (End-localized partial-chunk correction):
-      - For each prefill request r:
-          N_r = ceil(P_r / C)
-          ρ_r = P_r - C*(N_r-1)  in (0, C]
-          μ_r = C - ρ_r          in [0, C)
-      - End-localized assumption:
-          The final (possibly partial) prefill step occurs near the trace-visible
-          end of prefill at time t_{r,e}. We therefore assign the entire missing
-          mass μ_r to the *single* time-grid segment that contains t_{r,e}.
+    Paper mapping (End-localized correction)
+    ----------------------------------------
+    For each request r with prefill tokens P_r and inferred prefill steps N_r:
+      ρ_r = P_r - C*(N_r - 1)      in (0, C]
+      μ_r = C - ρ_r                in [0, C)
 
-    Concretely, letting j(r) be the segment index such that:
-        t_{r,e} ∈ [grid[j(r)], grid[j(r)+1]),   (with boundary clamping)
-    we define a piecewise-constant correction rate:
-        corr_rate(t) = Σ_r  μ_r / Δt_{j(r)}    on segment j(r),
-    where Δt_{j} = grid[j+1] - grid[j].
+    End-localized correction assumes the final (possibly partial) prefill step
+    completes near the trace-visible prefill end time t_{r,e}. We therefore assign
+    the entire missing mass μ_r to the single trace-induced grid segment that contains
+    t_{r,e}:
+
+      If t_{r,e} ∈ [grid[j], grid[j+1]), then on that segment:
+        c_r(t) = μ_r / (grid[j+1] - grid[j])   [tokens/sec]
+      and c(t) = Σ_r c_r(t).
+
+    Code naming note (important)
+    ----------------------------
+    The paper denotes the correction signal by c(t) (tokens/sec).
+    This implementation returns it as corr_rate (tokens/sec).
 
     The estimator uses the correction only through integrated form:
-        corr_tokens(a,b) = ∫_a^b corr_rate(t) dt  [tokens]
-
-    Inputs
-    ------
-    df : pd.DataFrame, shape (n, ...)
-        Full phase table; used for column presence checks.
-    grid : np.ndarray, shape (M,)
-        Global time grid.
-    chunk_size : int
-        C, tokens per prefill step.
-    prefill_df : pd.DataFrame, shape (n_pf, ...)
-        Prefill-only subset (one row per request, enforced by caller).
-        Must contain:
-          - t_end_col (t_{r,e})
-          - prefill_tokens_col (P_r)
-          - n_steps_col (N_r)
-        Note: t_start_col is accepted for signature compatibility but is not
-        required for end-localized placement (only t_end matters).
-    t_start_col, t_end_col : str
-        Column names for prefill interval boundaries.
-        (Only t_end_col is used by this implementation.)
-    prefill_tokens_col : str
-        Column name for number of prefill tokens P_r.
-    n_steps_col : str
-        Column name for inferred prefill steps N_r.
+      ∫ c(t) dt  (tokens)
 
     Outputs
     -------
     corr_rate : np.ndarray, shape (S=M-1,), float64
-        Aggregate correction rate over all requests, units: tokens/second.
-        For end-localized correction, each request contributes to *exactly one*
-        segment: the one containing its t_end.
+        Aggregate correction signal c(t) on each segment, units: tokens/second.
     I_corr : np.ndarray, shape (M,), float64
-        Prefix integral of corr_rate over time:
-          I_corr[k] = ∫_{grid[0]}^{grid[k]} corr_rate(t) dt
-        units: tokens.
+        Prefix integral of corr_rate over time, units: tokens.
 
-    Notes on why units differ
-    -------------------------
-    - p_pf_full is tokens/step, so ∫ p_pf_full dt is (tokens/step)*seconds.
-    - corr_rate is tokens/second, so ∫ corr_rate dt is tokens.
+    Unit reminder (critical)
+    ------------------------
+    In A_pf_i, the integrated correction (tokens) is subtracted directly and MUST
+    NOT be multiplied by λ̂_i.
 
-    In the exposure computation, corr_tokens must be subtracted directly from A_pf_i
-    (which is also tokens). It must NOT be multiplied by λ̂_i.
-
-    Edge cases / clamping
-    ---------------------
-    - If t_end equals the last grid boundary (grid[-1]), we clamp to the final
-      segment index S-1. This preserves the "assign to the smallest grid interval
-      containing t_end" intent under half-open segment conventions.
-    - If a segment has zero duration (should not happen with unique sorted grid),
-      we raise to avoid division by zero.
+    Edge cases
+    ----------
+    If t_end equals the last grid boundary grid[-1], we clamp to the final segment
+    index S-1 to preserve the intended “segment containing t_end” behavior under
+    half-open segment conventions.
     """
+
     corr_rate = np.zeros(grid.size - 1, dtype=np.float64)
 
     if prefill_df.empty:
@@ -981,26 +992,31 @@ def _compute_exposures(
     I_corr: np.ndarray,
 ) -> pd.DataFrame:
     """
-    Compute baseline integrated token exposures A_pf_i and A_dec_i for each phase instance.
+    Compute baseline integrated token exposures A_pf_i and A_dec_i for each phase instance i.
 
-    Paper mapping (Baseline integrated exposures, Eq. (baseline_integrated_exposures)):
-      A_pf_i  = ∫_{t_s}^{t_e} \tilde p_pf(t) * λ̂_i dt
-      A_dec_i = ∫_{t_s}^{t_e} p_dec(t)       * λ̂_i dt
+    Paper mapping (Baseline integrated exposures)
+    ---------------------------------------------
+    Pressures are defined as tokens/step functions of wall-clock time t on the
+    trace-induced grid. The baseline converts time-integrated pressures into token
+    exposures using the phase-local step-density proxy λ̂_i (steps/sec).
 
-    In this baseline implementation:
-      - \tilde p_pf(t) is represented implicitly as:
-            p_pf_full(t) - (correction expressed in integrated tokens)
-      - So we compute:
-            A_pf_i = λ̂_i * ∫ p_pf_full(t) dt  -  ∫ corr_rate(t) dt
-            A_dec_i = λ̂_i * ∫ p_dec(t) dt
+    The paper defines:
+      A_pf_i  = λ̂_i * ∫_{t_{i,s}}^{t_{i,e}} p_pf_full(t) dt  -  ∫_{t_{i,s}}^{t_{i,e}} c(t) dt
+      A_dec_i = λ̂_i * ∫_{t_{i,s}}^{t_{i,e}} p_dec(t) dt
+
+    Code naming notes (important)
+    -----------------------------
+    - The paper denotes phase duration by ℓ_i. This implementation stores ℓ_i as df["T_i"].
+    - The paper denotes the prefill correction signal by c(t) (tokens/sec).
+      This implementation stores c(t) as corr_rate (tokens/sec).
 
     Inputs
     ------
     df : pd.DataFrame, shape (n, ...)
         Must contain:
-          - df["lambda_hat"] (steps/second)
+          - df["lambda_hat"] : λ̂_i (steps/second)
         This function adds:
-          - df["A_pf_i"], df["A_dec_i"] (tokens)
+          - df["A_pf_i"], df["A_dec_i"] : token exposures (tokens)
     starts, ends : np.ndarray, shape (n,)
         Phase boundaries aligned with df rows.
     grid : np.ndarray, shape (M,)
@@ -1012,22 +1028,16 @@ def _compute_exposures(
     I_pf_full, I_dec : np.ndarray, shape (M,)
         Prefix integrals of pressures, units: (tokens/step)*seconds.
     corr_rate : np.ndarray, shape (S=M-1,)
-        Partial-chunk correction rate per segment, tokens/second
+        Prefill correction signal c(t) per segment, tokens/second.
     I_corr : np.ndarray, shape (M,)
         Prefix integral of corr_rate, units: tokens.
 
-    Outputs
-    -------
-    df : pd.DataFrame, shape (n, ...)
-        Adds:
-          - A_pf_i  : float64, shape (n,), tokens
-          - A_dec_i : float64, shape (n,), tokens
-
-    Critical unit reminder (do not change)
-    --------------------------------------
-    corr_tokens = ∫ corr_rate dt is already in TOKENS, so we subtract it directly.
-    We do NOT multiply corr_tokens by lam[i].
+    Unit reminder (do not change)
+    -----------------------------
+    ∫ corr_rate dt is already in TOKENS, so it is subtracted directly in A_pf_i.
+    It MUST NOT be multiplied by λ̂_i.
     """
+
     A_pf = np.zeros(len(df), dtype=np.float64)
     A_dec = np.zeros(len(df), dtype=np.float64)
 
@@ -1231,8 +1241,12 @@ def estimate_betas_baseline(
     Estimation meaning (paper)
     --------------------------
     This corresponds to solving Eq. (baseline_nnls) using baseline features
-    from Eq. (baseline_integrated_exposures) with the specified partial-chunk
-    correction mode (default: end-localized).
+    from Eq. (baseline_integrated_exposures), with the specified prefill
+    partial-chunk correction mode.
+
+    Notation bridges:
+      - Paper duration ℓ_i is stored as df["T_i"] in this implementation.
+      - Paper correction signal c(t) (tokens/sec) is represented as corr_rate.
     """
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
