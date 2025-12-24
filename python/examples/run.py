@@ -13,9 +13,6 @@ package (recommended):
 
   python -m pip install -e .
 
-With that in place, the estimator can be imported normally as:
-  from baseline.timeintegral import estimate_betas_baseline
-
 Usage
 -----
 From the `python/` directory:
@@ -34,7 +31,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from baseline.timeintegral import estimate_betas_baseline
+from estimators.baseline import estimate_betas_baseline
 
 
 def _default_csv_path() -> Path:

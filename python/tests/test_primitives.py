@@ -1,8 +1,8 @@
 """
-tests/test_timeintegral_primitives.py
+tests/test_primitives.py
 
 High-leverage unit tests for the lowest-level math primitives in
-baseline/timeintegral.py.
+estimators/baseline.py.
 
 These functions are the foundation for pressures, correction signals,
 and token exposure computations.
@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from baseline.timeintegral import (
+from estimators.baseline import (
     _build_time_grid,
     _integral_on_interval,
     _prefix_integral,

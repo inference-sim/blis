@@ -15,14 +15,13 @@ From this directory:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
 pip install -e .
 ```
 
-## Run the baseline example (self-contained smoke test)
+## Run the baseline estimator (self-contained smoke test)
 
 ```bash
-python baseline/timeintegral.py
+python estimators/baseline.py
 ```
 
 This runs a small self-contained synthetic example and prints the estimated coefficients and basic diagnostics. You should see output similar to the following.
@@ -55,8 +54,8 @@ with start/end timestamps and token counts.
 ## Code layout
 
 ```text
-baseline/
-  timeintegral.py   # baseline time-integrated NNLS estimator
+estimators/
+  baseline.py   # baseline time-integrated NNLS estimator
 ```
 
 The main entry point is:
@@ -78,7 +77,7 @@ The project uses `pytest` for unit tests and `pytest-cov` for coverage reporting
 From this directory, with the virtual environment activated:
 
 ```bash
-python -m pip install -r requirements-dev.txt
+pip install -e '.[dev]'
 ```
 
 ### Run tests
@@ -106,9 +105,4 @@ This reports coverage only for the baseline/ package (not examples).
 - Default settings reproduce the paper’s baseline estimator exactly.
 - Optional robustness knobs (e.g., duration clamping) are documented in code.
 - Iterative step-density reweighting will be implemented separately (future extensions).
-- Use `python -m pytest`, not `pytest`, to avoid accidentally running
-a system-installed `pytest` outside the virtual environment (common on macOS).
-- The initial test suite focuses on low-level mathematical primitives.
-End-to-end estimator tests will be added incrementally.
-- Coverage thresholds are not enforced yet; the goal is correctness first,
-then coverage hardening.
+- Use `python -m`. For instance, use `python -m pytest` and not `pytest`, to avoid accidentally running a system-installed `pytest` outside the virtual environment (common on macOS).

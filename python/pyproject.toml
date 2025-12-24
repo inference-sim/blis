@@ -3,22 +3,21 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "blis-baseline"
+name = "blis-estimators"
 version = "0.1.0"
-description = "Trace-only baseline estimator for step-level execution coefficients in vLLM-style inference"
+description = "Trace-only estimators for step-level execution coefficients in vLLM-style inference"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
   { name = "BLIS authors" }
 ]
-
 dependencies = [
-  "numpy",
-  "pandas",
-  "scikit-learn",
+  "numpy>=1.21",
+  "pandas>=1.4",
+  "scikit-learn>=1.0",
 ]
 
-# We are not publishing to PyPI; this is for editable installs and clean imports.
+# Not publishing to PyPI; used for editable installs and clean imports.
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -32,17 +31,10 @@ dev = [
   "hypothesis",
 ]
 
-# Tell setuptools where the code lives.
-[tool.setuptools]
-package-dir = {"" = "."}
-
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["baseline*"]
+include = ["estimators*"]
 
-# -----------------------
-# Pytest configuration
-# -----------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = [
@@ -51,12 +43,9 @@ addopts = [
   "--disable-warnings",
 ]
 
-# -----------------------
-# Coverage configuration
-# -----------------------
 [tool.coverage.run]
 branch = true
-source = ["baseline"]
+source = ["estimators"]
 
 [tool.coverage.report]
 show_missing = true
