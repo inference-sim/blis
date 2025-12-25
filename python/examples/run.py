@@ -30,8 +30,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from estimators.baseline import estimate_betas_baseline
-from estimators.iterative import estimate_betas_iterative
+from estimators import estimate_betas_baseline
+from estimators import estimate_betas_iterative
 
 
 # -------------------------
@@ -131,12 +131,6 @@ def _build_parser(default_csv: Path) -> argparse.ArgumentParser:
         help="(Iterative only) Damping eta in (0,1]. 1.0 means no damping.",
     )
     parser.add_argument(
-        "--inner-beta-informed-passes",
-        type=int,
-        default=2,
-        help="(Iterative only) Small inner passes for beta_informed correction (typically 1-2).",
-    )
-    parser.add_argument(
         "--init-via-baseline-correction",
         type=str,
         default="end",
@@ -218,7 +212,6 @@ def main() -> int:
     print(f"  max_outer_iters:             {args.max_outer_iters}")
     print(f"  tol:                         {args.tol}")
     print(f"  damping_eta:                 {args.damping_eta}")
-    print(f"  inner_beta_informed_passes:  {args.inner_beta_informed_passes}")
     print(f"  init_via_baseline_correction:{args.init_via_baseline_correction}")
     print()
 
@@ -230,7 +223,6 @@ def main() -> int:
         max_outer_iters=args.max_outer_iters,
         tol=args.tol,
         damping_eta=args.damping_eta,
-        inner_beta_informed_passes=args.inner_beta_informed_passes,
         init_via_baseline_correction=args.init_via_baseline_correction,
     )
 

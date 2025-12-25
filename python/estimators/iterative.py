@@ -570,7 +570,6 @@ def estimate_betas_iterative(
     max_outer_iters: int = 25,
     tol: float = 1e-6,
     damping_eta: float = 1.0,
-    inner_beta_informed_passes: int = 2,
     init_via_baseline_correction: PartialChunkCorrectionMode = "end",
 ) -> IterativeBetaResult:
     """
@@ -594,15 +593,6 @@ def estimate_betas_iterative(
         - beta_informed:
             Use the paper's beta-informed localization of missing mass via
             lambda^(m) and last-step windows (Eq. (qr_def_m)–(cr_beta_informed_m)).
-
-    inner_beta_informed_passes : int
-        Small inner passes used only when prefill_correction_mode="beta_informed".
-        Because tilde_p_pf^(m) depends on lambda^(m), and lambda^(m) depends on
-        tilde_p_pf^(m-1), a practical implementation can optionally refine the
-        correction within the same outer iteration by recomputing:
-            lambda^(m) -> c^(m) -> tilde_p_pf^(m) -> (optionally update lambda^(m))
-        while keeping beta^(m-1) fixed.
-        1–2 passes are typically sufficient; set to 1 for strictest semantics.
 
     init_via_baseline_correction : {"end","uniform","none"}
         Correction mode used for baseline initialization beta^(0) (unless the caller
@@ -629,8 +619,6 @@ def estimate_betas_iterative(
         raise ValueError("tol must be positive.")
     if not (0.0 < damping_eta <= 1.0):
         raise ValueError("damping_eta must be in (0,1].")
-    if inner_beta_informed_passes <= 0:
-        raise ValueError("inner_beta_informed_passes must be >= 1.")
 
     # -------------------------------------------------------------------------
     # 1) Validate schema and normalize (reuse baseline helper)
@@ -755,74 +743,54 @@ def estimate_betas_iterative(
     # -------------------------------------------------------------------------
     # 8) Outer MM loop
     # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 8) Outer MM loop (paper-faithful: NO inner passes)
+    # -------------------------------------------------------------------------
     for m in range(1, max_outer_iters + 1):
         # (a) Compute lambda^(m) from beta^(m-1) and tilde_p_pf^(m-1)
+        #     Paper Eq. (local_step_time_m) + Eq. (step_density_m):
+        #       Delta^(m)(t) = beta^(m-1)_0 + beta^(m-1)_1 * tilde_p_pf^(m-1)(t) + beta^(m-1)_2 * p_dec(t)
+        #       lambda^(m)(t) = 1 / Delta^(m)(t)
         _Delta_seg, lambda_seg = _lambda_segment_from_beta_and_pressures(
             beta_prev=beta_prev,
-            tilde_p_pf_prev=tilde_p_pf_prev,
+            tilde_p_pf_prev=tilde_p_pf_prev,   # <-- lagged effective prefill pressure (m-1)
             p_dec=p_dec,
         )
 
-        # (b) Compute correction and tilde_p_pf^(m) (possibly with small inner passes)
-        #     Inner passes keep beta fixed but can refine:
-        #         lambda -> c -> tilde_p_pf -> (optionally update lambda)
-        tilde_p_pf_m = None
-        corr_rate_m = None
+        # (b) Compute correction c^(m)(t) using frozen lambda^(m), then tilde_p_pf^(m)(t)
+        #     Paper Eq. (cr_beta_informed_m) + Eq. (prefill_pressure_beta_informed_m):
+        #       tilde_p_pf^(m)(t) = p_pf_full(t) - c^(m)(t) / lambda^(m)(t)
+        #
+        # IMPORTANT (paper semantics): c^(m) depends on lambda^(m), but lambda^(m)
+        # depends ONLY on tilde_p_pf^(m-1), not on tilde_p_pf^(m).
+        corr_rate_m = _trace_only_correction_rate_on_grid(
+            mode=prefill_correction_mode,
+            df_full=df,
+            grid=grid,
+            chunk_size=chunk_size,
+            prefill_df=prefill_df,
+            t_start_col=t_start_col,
+            t_end_col=t_end_col,
+            prefill_tokens_col=prefill_tokens_col,
+            n_steps_col=n_steps_col,
+            lambda_seg=lambda_seg,            # <-- frozen lambda^(m)
+            prefill_req=prefill_req,
+        )
 
-        n_inner = inner_beta_informed_passes if prefill_correction_mode == "beta_informed" else 1
+        denom = np.maximum(lambda_seg, 1e-12)  # guard division
+        tilde_p_pf_m = p_pf_full - (corr_rate_m / denom)
+        tilde_p_pf_m = np.maximum(tilde_p_pf_m, 0.0)  # numeric safety
 
-        tilde_p_work = tilde_p_pf_prev.copy()
-        lambda_work = lambda_seg.copy()
-
-        for inner in range(n_inner):
-            corr_rate_work = _trace_only_correction_rate_on_grid(
-                mode=prefill_correction_mode,
-                df_full=df,
-                grid=grid,
-                chunk_size=chunk_size,
-                prefill_df=prefill_df,
-                t_start_col=t_start_col,
-                t_end_col=t_end_col,
-                prefill_tokens_col=prefill_tokens_col,
-                n_steps_col=n_steps_col,
-                lambda_seg=lambda_work,
-                prefill_req=prefill_req,
-            )
-
-            # Effective prefill pressure: tilde_p = p_pf_full - c/lambda   [tokens/step]
-            # Guard lambda to avoid division blow-ups.
-            denom = np.maximum(lambda_work, 1e-12)
-            tilde_p_new = p_pf_full - (corr_rate_work / denom)
-
-            # Optional safety: clip tiny negative values due to rounding.
-            tilde_p_new = np.maximum(tilde_p_new, 0.0)
-
-            # If beta_informed and we want another inner refinement pass, update lambda_work
-            # using the *same* beta_prev but the newly computed tilde_p.
-            if inner < n_inner - 1:
-                _D2, lambda_work = _lambda_segment_from_beta_and_pressures(
-                    beta_prev=beta_prev,
-                    tilde_p_pf_prev=tilde_p_new,
-                    p_dec=p_dec,
-                )
-                tilde_p_work = tilde_p_new
-            else:
-                tilde_p_pf_m = tilde_p_new
-                corr_rate_m = corr_rate_work
-
-        assert tilde_p_pf_m is not None
-        assert corr_rate_m is not None
-
-        # (c) Compute phase step-averaged pressures using lambda^(m) (frozen for this iteration).
-        #     IMPORTANT: use the final lambda_work consistent with tilde_p_pf_m (for beta_informed).
-        #     For end/uniform/none, lambda_work == lambda_seg (single pass).
+        # (c) Compute phase step-averaged pressures using frozen lambda^(m)
+        #     Paper Eq. (step_averaged_pressures_m):
+        #       bar_p_i^(m) = ∫ p(t) q_i^(m)(t) dt, where q_i^(m) ∝ lambda^(m)
         bar_pf, bar_dec = _step_averaged_pressures_per_phase(
             df=df,
             grid=grid,
             starts=starts,
             ends=ends,
-            lambda_seg=lambda_work,
-            tilde_p_pf_seg=tilde_p_pf_m,
+            lambda_seg=lambda_seg,            # <-- frozen lambda^(m)
+            tilde_p_pf_seg=tilde_p_pf_m,      # <-- tilde_p_pf^(m)
             p_dec=p_dec,
         )
 
@@ -843,13 +811,13 @@ def estimate_betas_iterative(
         # (e) Convergence check
         d = float(np.linalg.norm(beta_new - beta_prev, ord=2))
         beta_prev = beta_new
-        tilde_p_pf_prev = tilde_p_pf_m
+        tilde_p_pf_prev = tilde_p_pf_m  # advance lagged effective pressure
 
         beta_hist.append(tuple(map(float, beta_prev)))
         delta_hist.append(d)
         r2_hist.append(float(fit_diag.get("r2", float("nan"))))
         rmse_hist.append(float(fit_diag.get("rmse_seconds", float("nan"))))
-        notes.append(f"outer_iter={m}, inner_passes={n_inner}")
+        notes.append(f"outer_iter={m}")
 
         n_outer_executed = m
         if d < tol:
@@ -873,16 +841,15 @@ def estimate_betas_iterative(
     }
 
 
-    if r2_hist:
-        diagnostics["final_r2"] = float(r2_hist[-1])
-    if rmse_hist:
-        diagnostics["final_rmse_seconds"] = float(rmse_hist[-1])
+    diagnostics["final_r2"] = float(r2_hist[-1]) if r2_hist else float("nan")
+    diagnostics["final_rmse_seconds"] = float(rmse_hist[-1]) if rmse_hist else float("nan")
     if delta_hist:
         diagnostics["final_delta_beta_l2"] = float(delta_hist[-1])
 
     # Feature scale diagnostics (helpful for debugging unit mistakes)
     diagnostics["mean_steps"] = float(np.mean(N_i)) if n else float("nan")
     diagnostics["mean_duration_seconds"] = float(np.mean(T_i)) if n else float("nan")
+    diagnostics["n_phases"] = float(n)
 
     history: Dict[str, object] = {
         "beta": beta_hist,
@@ -941,7 +908,6 @@ def _example() -> None:
         max_outer_iters=10,
         tol=1e-6,
         damping_eta=1.0,
-        inner_beta_informed_passes=2,
         init_via_baseline_correction="end",
     )
 

@@ -42,10 +42,56 @@ Diagnostics:
   mean_A_dec_tokens: 2.625
 ```
 
-## Run the baseline with sample traces
+## Run the iterative estimator (self-contained smoke test)
+
+```bash
+python estimators/iterative.py
+```
+
+You should see output similar to the following.
+
+```text
+Estimated betas (iterative):
+  beta0 (sec/step):  0.000000
+  beta1 (sec/token): 0.016305
+  beta2 (sec/token): 0.566230
+
+Converged: True  (outer iters: 7)
+
+Diagnostics:
+  converged: True
+  n_outer_iters: 7.0
+  tol: 1e-06
+  damping_eta: 1.0
+  init_beta0: 1.007132667617689
+  init_beta1: 0.001426533523537803
+  init_beta2: 0.0
+  final_beta0: 0.0
+  final_beta1: 0.01630452988345182
+  final_beta2: 0.5662300313808896
+  final_r2: 0.872478801097554
+  final_rmse_seconds: 0.3092586282981195
+  final_delta_beta_l2: 1.923534171473337e-07
+  mean_steps: 2.25
+  mean_duration_seconds: 2.5
+  n_phases: 4.0
+
+Beta history (last few iters):
+  iter   3: beta0=0.000000, beta1=0.016249, beta2=0.565666
+  iter   4: beta0=0.000000, beta1=0.016301, beta2=0.566179
+  iter   5: beta0=0.000000, beta1=0.016305, beta2=0.566224
+  iter   6: beta0=0.000000, beta1=0.016305, beta2=0.566230
+  iter   7: beta0=0.000000, beta1=0.016305, beta2=0.566230
+```
+
+## Run with sample traces
 
 ```bash
 python examples/run.py --csv data/traces/sample.csv --chunk-size 64
+```
+
+```bash
+python examples/run.py --csv data/traces/sample.csv --chunk-size 64 --algo iterative --correction-mode beta_informed --damping-eta 1.0
 ```
 
 The CSV is expected to contain one row per phase instance (prefill or decode),
@@ -93,16 +139,15 @@ To run the full test suite with branch coverage and see missing lines:
 
 ```bash
 python -m pytest \
-  --cov=baseline \
+  --cov=estimators \
   --cov-branch \
   --cov-report=term-missing
 ```
 
-This reports coverage only for the baseline/ package (not examples).
+This reports coverage only for the estimators/ package (not examples).
 
 ## Notes
 
-- Default settings reproduce the paper’s baseline estimator exactly.
+- Default settings reproduce the paper’s baseline and iterative estimators exactly.
 - Optional robustness knobs (e.g., duration clamping) are documented in code.
-- Iterative step-density reweighting will be implemented separately (future extensions).
 - Use `python -m`. For instance, use `python -m pytest` and not `pytest`, to avoid accidentally running a system-installed `pytest` outside the virtual environment (common on macOS).
