@@ -4,15 +4,24 @@
 \usepackage{times}
 \usepackage{graphicx}
 \usepackage{amsmath, amssymb}
+\usepackage{mathtools} % for \xmapsto
 \usepackage{bm}
 \usepackage[most]{tcolorbox}
 \usepackage{tabularx}
 \usepackage{pifont} % optional for symbols
+% --- Flowcharts (TikZ) ---
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc}
 \usepackage{xcolor}
+% Algorithms (compact)
 \usepackage{algorithm}
 \usepackage{algpseudocode}
+
+% Optional: slightly tighter algorithm typography
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\algrenewcommand\algorithmiccomment[1]{\hfill{\footnotesize$\triangleright$~#1}}
+
 \usepackage{hyperref}
 \usepackage{geometry}
 \geometry{margin=1in}
@@ -26,7 +35,6 @@
 % --- Theorems, lemmas, claims, proofs ---
 \usepackage{amsthm}
 
-% Number theorems within sections; share a counter across theorem-like envs.
 \theoremstyle{plain} % bold headings, italic body
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}[theorem]{Lemma}
@@ -88,8 +96,8 @@ designed to model inference request flows and latency.
 \section{Design overview}
 \label{sec:design-overview}
 
-BLIS is primarily geared towards vLLM. We will describe extensions for other
-inference platforms like sglang in Section \ref{sec:future-work}.
+BLIS is primarily geared towards vLLM; we discuss extensions 
+to other inference platforms (e.g., sglang) in future work.
 
 \subsection{vLLM overview}
 \label{subsec:vllm-overview}
@@ -184,563 +192,6 @@ The server emits response $i$ to the
 client. This contributes a network latency that depends linearly 
 on the number of output tokens $\ell_i^{\text{out}}$.
 
-\iffalse
-\subsection{End-to-End request latency model}
-\label{subsec:end-to-end-latency-model}
-
-Let $\lambda_j$ denote the duration of busy loop iteration $j$. We start
-with a high-level model for the end-to-end latency as follows.
-
-\begin{align}
-e_i \approx \alpha_0
- + \alpha_1 \ell_i^{\text{in}}
- + \alpha_2 \ell_i^{\text{out}}
- + \sum_{\text{i waits at j}} \lambda_j
- + \sum_{\text{i prefills at j}} \lambda_j
- + \sum_{\text{i decodes at j}} \lambda_j
-\label{eq:e2e-param}
-\end{align}
-
-\textbf{Note:} When we write $a \approx b$, it is shorthand for $a=b+\varepsilon$ 
-where $\varepsilon$ is a residual noise term. Regression equations such 
-as \eqref{eq:e2e-param} are understood to hold up to residual noise term.
-
-\subsubsection{Busy loop}
-\label{subsubsec:busy-loop-latency-model}
-Let $\chi_{j,i}^{\text{hit}}$ and $\chi_{j,i}^{\text{miss}}$ be the numbers of 
-cached and uncached (new) tokens of request $i$ during iteration $j$.
-Define the following request sets.
-\begin{align*}
-  \mathcal{P}_j & = & \{i:\text{$i$ is in prefill at $j$}\} \nonumber \\
-  \mathcal{B}^{(1)}_j & = & \{i:\text{$i$ is in its first busy loop iteration at $j$}\} \nonumber \\
-  \mathcal{D}_j & = & \{i:\text{$i$ is decoding at $j$}\} \nonumber \\
-  \mathcal{F}_j & = & \{i:\text{$i$ finishes at $j$}\}
-\end{align*}
-Let $\ell_{j,i}$ denote the context length of request $i$ at the 
-start of iteration $j$.
-
-\paragraph*{Quadratic prefill term.} We define a quadratic term as follows.
-\begin{align}
-\psi_j
-  = \sum_{i \in \mathcal{P}_j}
-    \Big(
-      \chi_{j,i}^{\text{miss}} \cdot \chi_{j,i}^{\text{hit}}
-      + \big(\chi_{j,i}^{\text{miss}}\big)^2
-    \Big)
-\label{eq:quad}
-\end{align}
-
-\paragraph*{Latency model.}
-Let $L^{\text{dec}}_j=\sum_{i\in\mathcal{D}_j}\ell_{j,i}$ be the total decode
-context length in iteration $j$, and
-$L^{\text{fin}}_j=\sum_{i\in\mathcal{F}_j}\ell_{j,i}$ the total context length of
-requests that finish in $j$ (a proxy for KV cache tokens to free). 
-We model the iteration time as
-\begin{align}
-\lambda_j 
-  \approx \beta_0
-  + \beta_1 \sum_{i \in \mathcal{B}^{(1)}_j} \chi_{j,i}^{\text{hit}}
-  + \beta_2 \sum_{i \in \mathcal{P}_j}      \chi_{j,i}^{\text{miss}}
-  + \beta_3 \psi_j 
-  + \beta_4 |\mathcal{D}_j|
-  + \beta_5 L^{\text{dec}}_j
-  + \beta_6 |\mathcal{F}_j|
-  + \beta_7 L^{\text{fin}}_j
-\label{eq:busy-loop-expanded}
-\end{align}
-
-\paragraph*{Justification.} Each busy-loop iteration mixes four kinds of work.
-
-\begin{enumerate}
-  \item \emph{Fixed work.} An iteration-invariant cost (\(\beta_0\)).
-  \item \emph{Prefill work.} The first prefill iteration of a request involves hashing
-its input tokens to determine the number of cache hits (linear in hits; \(\beta_1\)).
-Every new token pays a linear per-token cost (embeddings, MLP, KV writes; \(\beta_2\)).
-Attention mechanism during prefill is quadratic: every new token 
-(cache miss) must attend to all tokens already in the context (cache hit) 
-plus the other new tokens from the same chunk (\(\psi_j\) in~\eqref{eq:quad}; 
-\(\beta_3\)).
-  \item \emph{Decode work.} Decode generates one token per active request:
-there is a per-request overhead (\(\beta_4\)) and compute that scales with
-the request’s current context length (\(\beta_5\)).
-  \item \emph{Completion work.} When a request completes, we free KV blocks, update
-refcounts, and serialize output; this scales linearly in the number of 
-finished requests 
-(\(\beta_6\)) and the total length of finished requests (\(\beta_7\)).
-\end{enumerate}
-
-The coefficients \(\{\beta_k\}\) absorb model/hardware constants
-(layers, heads, width, precision, kernel efficiency).
-
-
-\section{Estimation}
-\label{sec:estimation}
-
-\subsection{Base Estimation with Linear Regression}
-\label{subsec:base-estimation-linear-regression}
-
-Equation (\ref{eq:busy-loop-expanded}) is a quadratic function of  
-$\boldsymbol{\chi^{\text{miss}}}$ and $\boldsymbol{\chi^{\text{hit}}}$; however,  
-it is a linear function of $\boldsymbol{\alpha}$ 
-and $\boldsymbol{\beta}$. This enables the estimation of $\boldsymbol{\alpha}$ 
-and $\boldsymbol{\beta}$ through linear regression as described
-in Scenario 3.
-
-\subsubsection{Scenario 3}
-\label{subsubsec:scenario3}
-
-Scenario~3 involves generating request quadruples (``quads'').  
-
-\paragraph*{Setup.}
-Unless otherwise specified, all lengths are in tokens. 
-Fix a chunk size $C\in\{256,512,1024,2048,4096\}$, 
-a block size $b\in\{8,16,32\}$, and maximum sequence length 
-$M = 8192$ blocks.
-
-Each quad $i$ consists of four requests $(i,1)$, $(i,2)$, $(i,3)$, and $(i,4)$.
-Requests within a quad may share prefixes, while requests across quads do not. 
-Requests are issued strictly sequentially; a request 
-is emitted by the client only after it receives the response to the previous request:
-$\ldots \to (i-1, 4) \to (i,1) \to (i,2) \to (i,3) \to (i,4) \to (i + 1,1) \to \ldots$ 
-
-The input length, output length, and the content of the requests are as follows.
-
-\begin{enumerate}
-  \item $(i,1)$ is a prefill-only request with input length 
-        $4 + \Delta_{i,1}$. Its first four tokens are distinct from the 
-        first four tokens of any request in quads $\{1, 2, \ldots, i-1 \}$. 
-        This guarantees that request $(i, 1)$ does not share a prefix with any 
-        previously generated requests. Its maximum output length is set to $1$.
-  \item $(i,2)$ is a prefill-only request with two input segments, of total length 
-        $5 + \Delta_{i,1} + \Delta_{i,2}$. 
-        The first segment is identical to $(i,1)$; the second has length 
-        $1 + \Delta_{i,2}$. Its maximum output length is set to $1$.
-  \item The input sequence of $(i,3)$ is identical to that of $(i,1)$. 
-        Its maximum output length is set to $1 + \Delta_{i,3}$.
-  \item $(i,4)$ has two input segments. The first segment is identical to $(i,1)$.  
-        The second segment has length $1 + \Delta_{i,2}$, but its first token  
-        differs from the first token of the second segment in $(i,2)$. 
-        This guarantees that request $(i, 4)$ shares a prefix of length exactly 
-        $4 + \Delta_{i,1}$ with other requests in this quad. Its maximum output length 
-        is set to $1 + \Delta_{i,3}$ blocks.
-\end{enumerate}
-
-The structure of the requests in the quad is summarized in the following table.
-
-\begin{table}[h]
-\centering
-\caption{Structure of requests in quad in Scenario 3; ``='' indicates a segment 
-that is identical to the $(i,1)$ input sequence.}
-\label{tab:quad-structure}
-\begin{tabular}{@{}c|c|c|c@{}}
-\toprule
-Request & Input Segments & Total Input & Output (max) \\ \midrule
-$(i,1)$ & $[4 + \Delta_{i,1}]$ 
-        & $4 + \Delta_{i,1}$ 
-        & 1 (prefill only) \\
-$(i,2)$ & $[= (i,1)], [1 + \Delta_{i,2}]$ 
-        & $5 + \Delta_{i,1} + \Delta_{i,2}$ 
-        & 1 (prefill only) \\
-$(i,3)$ & $[= (i,1)]$ 
-        & $4 + \Delta_{i,1}$ 
-        & $1 + \Delta_{i,3}$ \\
-$(i,4)$ & $[= (i,1)], [1 + \Delta_{i,2}]$
-        & $5 + \Delta_{i,1} + \Delta_{i,2}$ 
-        & $1 + \Delta_{i,3}$ \\ \bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph*{Sampling.}
-Requests in a quad have a maximum length budget of $M$ that must be divided across input segments and output, 
-with variability. We therefore sample the $\Delta$s using a Dirichlet–Multinomial: 
-a Dirichlet distribution enforces the simplex constraint and provides a 
-single concentration knob to control balanced vs. skewed splits, and the Multinomial yields integer lengths. 
-This also induces realistic negative correlations between parts (e.g., longer Segment~1 leaves fewer tokens 
-for Segment~2 or output). The sampler is given in Algorithm~\ref{algo:sc3sampler}.
-
-\begin{algorithm}[th]
-  \caption{Segment lengths sampler in Scenario 3 (Dirichlet–Multinomial)}
-  \label{algo:sc3sampler}
-  \begin{algorithmic}[1]
-    \Require Budget $N = M - 6$; concentration $\boldsymbol{\eta}=(\eta_1, \eta_2, \eta_3)$
-    \State Sample proportions $\mathbf{p} \sim \mathrm{Dirichlet}(\boldsymbol{\eta})$
-    \State Sample counts $(\Delta_{i,1}, \Delta_{i,2}, \Delta_{i,3}) \sim \mathrm{Multinomial}\left(N, \mathbf{p}\right)$
-    \State \textbf{return} $\Delta_{i,1}, \Delta_{i,2}, \Delta_{i,3}$
-  \end{algorithmic}
-\end{algorithm}
-
-\begin{theorem}
-\label{theo:scenario3}
-Define the following quantities.
-\begin{align*}
-& q_1 = \left\lfloor \frac{4 + \Delta_{i,1}}{C} \right\rfloor  
-& r_1 = \left\lceil \frac{4 + \Delta_{i,1}}{C} \right\rceil 
-& s_1 = \frac{4 + \Delta_{i,1}}{C} - q_1 & & s_1 \in [0,1) \nonumber \\
-& q_2 = \left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor
-& r_2 = \left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil
-& s_2 = \frac{1 + \Delta_{i,2}}{C} - q_2 & & s_2 \in [0,1) \nonumber \\
-& q_4 = \left\lfloor \frac{1 + \Delta_{i,2}}{C} \right\rfloor
-& r_4 = \left\lceil \frac{1 + \Delta_{i,2}}{C} \right\rceil
-& s_4 = \frac{1 + \Delta_{i,2}}{C} - q_4 & & s_4 \in [0,1)
-\end{align*}
-Recall that $\ell_i^{\text{out}}$ is the realized output length. 
-The end-to-end latencies in Scenario 3 can be expressed as follows.
-\begin{align}
-e_{i,1} & \approx \alpha_0
-  + \alpha_1 (4 + \Delta_{i,1})
-  + \alpha_2 \nonumber\\
-& + \beta_0 r_1
-  + \beta_2 (4 + \Delta_{i,1})
-  + \beta_3 C^2 \left(\frac{q_1 (q_1 + 1)}{2} + q_1 s_1 + s_1^2\right)
-  + \beta_6
-  + \beta_7 (5 + \Delta_{i,1}) \label{eq:req1-latency} \\
-e_{i,2} & \approx \alpha_0
-  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
-  + \alpha_2 \nonumber\\
-& + \beta_0 r_2
-  + \beta_1 (4 + \Delta_{i,1})
-  + \beta_2 (1 + \Delta_{i,2}) \nonumber\\
-& + \beta_3 \Big(
-      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
-      + C^2 \big(\tfrac{q_2(q_2+1)}{2} + q_2 s_2 + s_2^2\big)
-    \Big)
-  + \beta_6
-  + \beta_7 \big(6 + \Delta_{i,1} + \Delta_{i,2}\big)
-\label{eq:req2-latency} \\
-e_{i,3} & \approx \alpha_0
-  + \alpha_1 \big(4 + \Delta_{i,1}\big)
-  + \alpha_2 \ell_i^{\text{out}} \nonumber \\
-& + \beta_0 \ell_i^{\text{out}}
-  + \beta_1 \big(4 + \Delta_{i,1}\big) \nonumber \\
-&  + \beta_4 \ell_i^{\text{out}}
-  + \beta_5 \cdot \frac{\ell_i^{\text{out}} \big( 2(4 + \Delta_{i,1}) + \ell_i^{\text{out}} - 1 \big)}{2}
-  + \beta_6
-  + \beta_7 \big(4 + \Delta_{i,1} + \ell_i^{\text{out}}\big)
-\label{eq:req3-latency} \\
-e_{i,4} & \approx \alpha_0
-  + \alpha_1 \big(5 + \Delta_{i,1} + \Delta_{i,2}\big)
-  + \alpha_2 \ell_i^{\text{out}} \nonumber\\
-& + \beta_0 (r_4 + \ell_i^{\text{out}} - 1)
-  + \beta_1 \big(4 + \Delta_{i,1}\big)
-  + \beta_2 \big(1 + \Delta_{i,2}\big) \nonumber\\
-& + \beta_3 \Big(
-      (4 + \Delta_{i,1}) (1 + \Delta_{i,2})
-      + C^2 \big(\tfrac{q_4(q_4+1)}{2} + q_4 s_4 + s_4^2\big)
-    \Big) \nonumber\\
-& + \beta_4 (\ell_i^{\text{out}} - 1)
-  + \beta_5 \cdot \frac{(\ell_i^{\text{out}} - 1)\big(2(5 + \Delta_{i,1} + \Delta_{i,2}) + (\ell_i^{\text{out}} - 1) - 1\big)}{2} \nonumber\\
-& + \beta_6
-  + \beta_7 \big(5 + \Delta_{i,1} + \Delta_{i,2} + \ell_i^{\text{out}}\big)
-\label{eq:req4-latency}
-\end{align}
-
-\end{theorem}
-
-\begin{proof}[\textbf{Proof of \eqref{eq:req1-latency}}.]
-Start from the end-to-end model \eqref{eq:e2e-param}, where the busy-loop
-contribution is $\sum_j \lambda_j$ over the iterations in which $(i,1)$ is active.
-
-\emph{(i) Prefill-only structure.}
-Request $(i,1)$ shares no prefix with earlier requests by construction, so all its
-input tokens are uncached (misses). Since it is prefill-only, it participates in
-exactly $r_1 = \lceil (4 + \Delta_{i,1})/C \rceil$ prefill iterations and 
-no decode iterations.
-Thus, the fixed per-iteration cost contributes $\beta_0 r_1$, while the first-prefill
-hit term contributes $0$ (there are no hits in the first chunk).
-
-\emph{(ii) Linear per-miss work.}
-All $4 + \Delta_{i,1}$ input tokens are new, giving the linear term
-$\beta_2 (4 + \Delta_{i,1})$.
-
-\emph{(iii) Quadratic prefill work.}
-Let the prefill be split into $q_1$ full chunks of size $C$ and one final partial
-chunk of size $s_1 C$ (with $s_1 = 0$ meaning no partial chunk). 
-In chunk $t=1, \dots, q_1$,
-the request has $\chi^{\text{miss}} = C$ new tokens and $\chi^{\text{hit}} = (t-1)C$
-cached tokens from earlier chunks of the \emph{same} request. Hence
-\[
-\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
-= C \cdot (t-1)C + C^2 = C^2 t
-\]
-Summing over $t = 1$ to $q_1$ yields $C^2 \cdot \frac{q_1(q_1 + 1)}{2}$. 
-If $s_1 > 0$, the last
-partial chunk has $\chi^{\text{miss}} = s_1 C$ and $\chi^{\text{hit}} = q_1 C$, 
-contributing $C^2(q_1 s_1 + s_1^2)$. Together these give the quadratic term
-$\beta_3 C^2 \left( \frac{q_1(q_1 + 1)}{2} + q_1 s_1 + s_1^2 \right)$.
-
-\emph{(iv) Decode and completion terms.}
-There is no decode for a prefill-only request, so the $\beta_4$ and $\beta_5$
-terms are absent. The request finishes at the end of its last prefill iteration,
-so exactly one completion event occurs, contributing $\beta_6$ plus a cost that
-scales with the finished request’s context length. Using \eqref{eq:busy-loop-expanded},
-this adds $\beta_7 L^{\text{fin}}$, and for $(i,1)$, including the single output 
-token at finish, $L^{\text{fin}} = 5 + \Delta_{i,1}$, giving $\beta_7 (5 + \Delta_{i,1})$.
-
-\emph{(v) Ingress/egress and API costs.}
-The linear ingress/egress/API terms contribute
-$\alpha_0 + \alpha_1(4 + \Delta_{i,1}) + \alpha_2$ (the last because the maximum
-output is $1$).
-
-Collecting all nonzero contributions gives \eqref{eq:req1-latency}.
-\end{proof}
-
-\begin{proof}[\textbf{Proof of \eqref{eq:req2-latency}}.]
-Start from \eqref{eq:e2e-param}. Since requests are issued sequentially, 
-$(i,2)$ experiences no queueing from other requests; its busy-loop contribution 
-is the sum of $\lambda_j$ over iterations in which $(i,2)$ is in prefill.
-
-\emph{(i) Prefill structure and iteration count.}
-Request $(i,2)$ is prefill-only with a two-segment input: 
-a cached prefix of length $4 + \Delta_{i,1}$ (identical to $(i,1)$) and 
-a new segment of length $1 + \Delta_{i,2}$. Only the \emph{new} tokens are chunked, 
-so the number of prefill iterations is $r_2 = \lceil (1 + \Delta_{i,2})/C \rceil$, 
-giving the fixed cost $\beta_0 r_2$. Because cached tokens are already present at the 
-first prefill iteration, the first-chunk hit term contributes $\beta_1 (4 + \Delta_{i,1})$.
-
-\emph{(ii) Linear per-miss work.}
-Exactly $1 + \Delta_{i,2}$ tokens are new, yielding the 
-linear term $\beta_2 (1 + \Delta_{i,2})$.
-
-\emph{(iii) Quadratic prefill work.}
-Split the new segment into $q_2$ full chunks of size $C$ and one 
-final partial chunk of size $s_2C$ (with $s_2 = 0$ implying no partial chunk).
-For a full chunk $t=1, \ldots, q_2$, the new tokens (misses) are $C$ and the 
-cached tokens (hits) are $(4 + \Delta_{i,1}) + (t-1)C$ (the prefix plus prior new tokens). 
-Hence the quadratic contribution per full chunk is
-\[
-\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
-= C\big((4 + \Delta_{i,1}) + (t-1)C\big) + C^2
-= C(4 + \Delta_{i,1}) + C^2 t.
-\]
-Summing over $t=1$ to $q_2$ gives $C(4 + \Delta_{i,1}) q_2 + C^2 \tfrac{q_2(q_2 + 1)}{2}$.
-If $s_2 > 0$, the partial chunk contributes
-$s_2 C \cdot ((4 + \Delta_{i,1}) + q_2C) + (s_2C)^2
-= C (4 + \Delta_{i,1}) s_2 + C^2 (q_2 s_2 + s_2^2)$.
-Combining full and partial chunks,
-\[
-\sum \big(\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2\big)
-= (4 + \Delta_{i,1})(1 + \Delta_{i,2}) + C^2 \Big(\tfrac{q_2 (q_2 + 1)}{2} + q_2 s_2 + s_2^2 \Big)
-\]
-which yields the $\beta_3$ term in \eqref{eq:req2-latency}.
-
-\emph{(iv) Decode and completion terms.}
-There is no decode, so $\beta_4, \beta_5$ do not appear. 
-The request finishes at the end of its last prefill iteration, 
-contributing one completion event ($\beta_6$) and a length-proportional cost 
-$\beta_7 L^{\text{fin}}$. At finish, the context contains all input tokens 
-plus the single output token generated at prefill completion, 
-i.e., $L^{\text{fin}} = (5 + \Delta_{i,1} + \Delta_{i,2}) + 1 = 6 + \Delta_{i,1} + \Delta_{i,2}$.
-
-\emph{(v) Ingress/egress and API costs.}
-These contribute $\alpha_0 + \alpha_1 (5 + \Delta_{i,1} + \Delta_{i,2}) + \alpha_2$.
-
-Collecting all contributions gives \eqref{eq:req2-latency}.
-\end{proof}
-
-\begin{proof}[\textbf{Proof of \eqref{eq:req3-latency}}.]
-Start from \eqref{eq:e2e-param}. The input of $(i,3)$ equals $(i,1)$, so the entire
-prefix of length $4 + \Delta_{i,1}$ is cached.
-
-\emph{(i) First-iteration hit cost.}
-The engine must account for cached tokens
-once when the request first participates in the busy loop (a decode iteration here).
-This yields the hit term $\beta_1 (4 + \Delta_{i,1})$.
-
-\emph{(ii) No prefill-miss work.}
-There are no prefill iterations for $(i,3)$, so the $\beta_2$ and $\beta_3$ terms
-are absent.
-
-\emph{(iii) Decode iterations.}
-The request produces exactly $\ell_i^{\text{out}}$ tokens via decode, so there are
-$\ell_i^{\text{out}}$ iterations, contributing $\beta_0 \ell_i^{\text{out}}$ from fixed cost
-and $\beta_4 \ell_i^{\text{out}}$ from per-request overhead.
-
-\emph{(iv) Decode context-length work.}
-Decode iteration $t=0,\ldots,\ell_i^{\text{out}}-1$ sees context
-$ (4 + \Delta_{i,1}) + t$. Hence
-\[
-\sum \ell_{j,i}
-= \sum_{t=0}^{\ell_i^{\text{out}} - 1} \big(4 + \Delta_{i,1} + t\big)
-= \frac{\ell_i^{\text{out}} \big( 2(4 + \Delta_{i,1}) + \ell_i^{\text{out}} - 1 \big)}{2},
-\]
-which yields the $\beta_5$ term in \eqref{eq:req3-latency}.
-
-\emph{(v) Completion work.}
-Exactly one completion occurs, contributing $\beta_6$ and a length-proportional cost
-with $L^{\text{fin}} = (4 + \Delta_{i,1}) + \ell_i^{\text{out}}$, giving
-$\beta_7 \big(4 + \Delta_{i,1} + \ell_i^{\text{out}}\big)$.
-
-\emph{(vi) Ingress/egress and API costs.}
-These contribute $\alpha_0 + \alpha_1 (4 + \Delta_{i,1}) + \alpha_2 \ell_i^{\text{out}}$.
-
-Collecting terms gives \eqref{eq:req3-latency}.
-\end{proof}
-
-\begin{proof}[\textbf{Proof of \eqref{eq:req4-latency}}.]
-Start from \eqref{eq:e2e-param}. Request $(i,4)$ has a cached prefix of length
-$4+\Delta_{i,1}$ (identical to $(i,1)$), followed by a new segment of length
-$1+\Delta_{i,2}$, and it generates $\ell_i^{\text{out}}$ output tokens.
-
-\emph{(i) Prefill structure and iteration count.}
-Only the \emph{new} segment is chunked, so the number of prefill iterations is
-$r_4=\lceil(1+\Delta_{i,2})/C\rceil$, contributing the fixed cost $\beta_0 r_4$.
-Because cached tokens are present from the first prefill iteration, the first-iteration
-hit term contributes $\beta_1(4+\Delta_{i,1})$.
-
-\emph{(ii) Linear per-miss work.}
-Exactly $1+\Delta_{i,2}$ tokens are new, yielding $\beta_2(1+\Delta_{i,2})$.
-
-\emph{(iii) Quadratic prefill work.}
-Split the new segment into $q_4$ full chunks of size $C$ and a final partial of size
-$s_4C$ (when $s_4=0$ there is no partial). For a full chunk $t=1,\ldots,q_4$,
-$\chi^{\text{miss}}=C$ and $\chi^{\text{hit}}=(4+\Delta_{i,1})+(t-1)C$, so
-\[
-\chi^{\text{miss}}\chi^{\text{hit}} + (\chi^{\text{miss}})^2
-= C(4+\Delta_{i,1}) + C^2 t.
-\]
-Summing full chunks gives $C(4+\Delta_{i,1})q_4 + C^2\frac{q_4(q_4+1)}{2}$.
-If $s_4>0$, the partial contributes $C(4+\Delta_{i,1})s_4 + C^2(q_4 s_4 + s_4^2)$.
-Combining, the quadratic work equals
-\[
-(4+\Delta_{i,1})(1+\Delta_{i,2})
-+ C^2\!\left(\tfrac{q_4(q_4+1)}{2} + q_4 s_4 + s_4^2\right),
-\]
-yielding the $\beta_3$ term.
-
-\emph{(iv) Decode iterations.}
-Since the first output token is produced at the end of prefill, decode runs for
-$\ell_i^{\text{out}}-1$ iterations. This contributes $\beta_0(\ell_i^{\text{out}}-1)$
-from fixed cost and $\beta_4(\ell_i^{\text{out}}-1)$ from per-request overhead.
-
-\emph{(v) Decode context-length work.}
-Decode iteration $t=0,\ldots,\ell_i^{\text{out}}-2$ sees context
-$ (5+\Delta_{i,1}+\Delta_{i,2}) + t$, so
-\[
-\sum \ell_{j,i}
-= \sum_{t=0}^{\ell_i^{\text{out}}-2} \big(5+\Delta_{i,1}+\Delta_{i,2}+t\big)
-= \frac{(\ell_i^{\text{out}}-1)\big(2(5+\Delta_{i,1}+\Delta_{i,2}) + (\ell_i^{\text{out}}-1) - 1\big)}{2},
-\]
-giving the $\beta_5$ term.
-
-\emph{(vi) Completion work.}
-Exactly one completion occurs, contributing $\beta_6$ and a length-proportional cost
-with $L^{\text{fin}}=(5+\Delta_{i,1}+\Delta_{i,2})+\ell_i^{\text{out}}$, hence the
-$\beta_7$ term shown.
-
-\emph{(vii) Ingress/egress and API costs.}
-These contribute $\alpha_0 + \alpha_1(5+\Delta_{i,1}+\Delta_{i,2})
-+ \alpha_2 \ell_i^{\text{out}}$.
-
-Collecting all terms yields \eqref{eq:req4-latency}.
-\end{proof}
-
-
-\subsection{Refinements using Blackbox Optimization}
-\label{subsec:refinements-blackbox-optimization}
-
-\subsubsection{Scenario 4: Stress Workloads for Identifiability}
-\label{subsubsec:scenario4}
-
-\paragraph*{Why Scenario~4?}
-In Scenario~3 we issued requests strictly one after another. 
-This was useful for controlled analysis, but it makes some coefficients in 
-(\ref{eq:busy-loop-expanded}) hard to tell apart. 
-For example, the fixed per-iteration cost $\beta_0$ and the 
-per-finish cost $\beta_6$ always appear together, so 
-their effects ``bunch up.'' 
-Scenario~4 is designed to break such correlations by mixing 
-different kinds of requests \emph{concurrently}.
-
-\paragraph*{Key idea.}
-We want situations where:
-\begin{enumerate}
-  \item Busy loop iterations run for a long time \emph{without any finishes}
-        (so we can clearly see $\beta_0$, $\beta_4$, $\beta_5$).
-  \item Bursts of finishes happen with very little else going on
-        (so we can clearly see $\beta_6$, $\beta_7$).
-  \item Large uncached segments appear with different chunk sizes
-        (so we can measure quadratic prefill effects $\beta_2$, $\beta_3$).
-\end{enumerate}
-
-\paragraph*{How to craft the workload.}
-We design ``episodes'' that deliberately excite different parts of the latency model:
-\begin{itemize}
-  \item \textbf{Episode A (Decode plateaus):} Launch several long-output decode requests with cached prefixes. 
-  This produces many iterations with large decode load but no completions --- a clean signal for $\beta_0$, $\beta_4$, and $\beta_5$.
-  \item \textbf{Episode B (Finish spikes):} Launch many short-output requests close together. 
-  Their completions cluster, producing spikes that isolate $\beta_6$ and $\beta_7$.
-  \item \textbf{Episode C (Quadratic prefills):} Launch requests with long uncached segments under varying chunk sizes. 
-  This creates strong quadratic work that identifies $\beta_2$ and $\beta_3$.
-  \item \textbf{Episode D (Controls):} Run one request at a time. 
-  These anchor the fixed overhead terms $\alpha_0$ and $\beta_0$.
-\end{itemize}
-
-By mixing these episodes and varying chunk sizes $C$, block sizes $b$, and output lengths,
-we obtain diverse situations where the different cost terms can be estimated separately.
-
-\vspace{0.75em}
-\noindent\textbf{Takeaway.}  
-Unlike Scenario~3, requests in Scenario~4 should \emph{not} be strictly sequential.  
-They should overlap and stress the system in different ways to tease apart 
-the contributions of each coefficient.
-
-\subsection{Blackbox Optimization after Regression}
-\label{subsec:blackbox-after-ols}
-
-\paragraph*{Step 1: Linear regression as a baseline.}
-We first fit coefficients $(\alpha, \beta)$ using regression, 
-because (\ref{eq:e2e-param}) and (\ref{eq:busy-loop-expanded}) are linear in the coefficients. 
-This gives us good initial values quickly.
-
-\paragraph*{Step 2: Refine with blackbox optimization.}
-In reality, our predictor never matches the true system exactly:
-queueing noise, kernel implementations, and clock jitter 
-all introduce extra effects. 
-So we refine coefficients by treating the simulator + hardware as a 
-\emph{blackbox function}: input = coefficients, output = prediction error. 
-
-We want provably good algorithms that work even when we only observe noisy end-to-end latencies.
-
-\paragraph*{Provably convergent choice: SPSA.}
-A simple but powerful option is \emph{Simultaneous Perturbation Stochastic Approximation (SPSA)}:
-\begin{itemize}
-  \item At each step, we perturb all coefficients in random directions (e.g., $\pm 1$ signs).
-  \item We measure the loss (prediction error) at two points: ``plus perturbation'' and ``minus perturbation.''
-  \item From these two measurements we estimate a gradient and update all coefficients at once.
-\end{itemize}
-SPSA needs only two measurements per step \emph{regardless of how many coefficients we have}, 
-and it comes with convergence guarantees under standard step-size rules. 
-This makes it practical and theoretically sound.
-
-\paragraph*{Other practical options.}
-In addition to SPSA:
-\begin{itemize}
-  \item \textbf{Zeroth-order SGD:} Similar to SPSA but uses Gaussian perturbations; often smoother.
-  \item \textbf{BOBYQA/Cobyla:} Derivative-free optimizers that work well with box constraints.
-  \item \textbf{Bayesian optimization:} Useful if we reparameterize to a low dimension.
-  \item \textbf{CMA-ES / NES:} Robust global search strategies when the loss landscape has many local minima.
-\end{itemize}
-
-\paragraph*{Practical details.}
-\begin{itemize}
-  \item Use regression estimates as the starting point.
-  \item Impose box constraints (e.g., $\beta_2,\beta_3,\beta_5,\beta_6,\beta_7 \ge 0$).
-  \item Average losses over repeated runs of Scenario~4 episodes to reduce noise.
-  \item Early stop when validation episodes stop improving.
-\end{itemize}
-
-\paragraph*{Summary.}
-The strategy is:
-\begin{enumerate}
-  \item Design workloads (Scenario~4) that disentangle the cost terms.
-  \item Run linear regression for a fast baseline estimate.
-  \item Apply blackbox optimization (e.g., SPSA) for refinement, 
-  which provably converges using only end-to-end latency observations.
-\end{enumerate}
-This combination balances practicality (OLS initialization), 
-theory (provable blackbox convergence), and engineering usability.
-
-\fi
 
 \section{Trace-Only Estimation of Step-Level Execution Coefficients}
 \label{sec:step_beta_estimation}
@@ -752,11 +203,74 @@ First, we introduce a simple but principled baseline estimator that fits
 phase durations using time-integrated workload signals.
 Second, we refine this estimator using an iterative, step-density--reweighted
 procedure inspired by majorization--minimization (MM).
-Finally, we discuss robustness, calibration workload design, and practical
+Finally, we discuss robustness, workload design for calibration, and practical
 limitations.
 
-Throughout, we emphasize trace-only operation: no step boundaries,
+Throughout, we emphasize trace-only operation: no step boundaries, 
 per-step timings, or engine instrumentation are assumed.
+
+\paragraph{Notation and units (summary).}
+Table~\ref{tab:notation_summary} summarizes the principal symbols used in
+this section and their units.
+
+\begin{table}[ht!]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Symbol} & \textbf{Units} & \textbf{Meaning} \\
+\midrule
+$k$ & step index & busy-loop iteration (latent execution step) \\
+$r$ & request index & inference request; each has exactly one prefill phase and one decode phase \\
+$i$ & phase index & a specific phase (prefill or decode) of a specific request \\
+$m$ & iteration index & outer iteration of the step-density reweighted estimator \\[0.5ex]
+
+$t_{i,s},\,t_{i,e}$ & seconds & start and end times of phase $i$ \\
+$\ell_i$ & seconds & observed duration of phase $i$ \\
+$N_i$ & steps & trace-inferred step count for phase $i$ (held fixed during estimation) \\
+$\tau_i$ & categorical (unitless) & phase type of instance $i$ (\textsf{prefill} or \textsf{decode}) \\
+$T^{\mathrm{pf}}_k,\,T^{\mathrm{dec}}_k$ & tokens & prefill/decode token totals processed in step $k$ \\[0.5ex]
+
+$C$ & tokens/step & prefill chunk size \\
+$P_r$ & tokens & total (uncached) prefill tokens for request $r$ \\
+$D_r$ & tokens & total decode tokens for request $r$ \\
+$\rho_r$ & tokens & tokens processed in the final prefill step of request $r$, Eq.~\eqref{eq:rho_def} \\
+$\mu_r$ & tokens & missing token mass of final prefill chunk, $\mu_r=C-\rho_r$ \\[0.5ex]
+
+$a_r(t)$ & unitless & indicator that request $r$ is in prefill at time $t$ (trace-visible) \\
+$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ & tokens/step & naive full-chunk prefill pressure, $C\sum_r a_r(t)$ \\
+$p^{\mathrm{dec}}(t)$ & tokens/step & decode pressure (tokens/step) from overlapping decode phases \\[0.5ex]
+
+$\widehat{\lambda}_i$ & steps/sec & baseline phase-local step density proxy, $\widehat{\lambda}_i=N_i/\ell_i$ \\
+$c(t)$ & tokens/sec & baseline partial-chunk correction signal (uniform/end/none) \\[0.5ex]
+
+$A_i^{\mathrm{pf}}$ & tokens & baseline prefill exposure, Eq.~\eqref{eq:baseline_integrated_exposures_pf} \\
+$A_i^{\mathrm{dec}}$ & tokens & baseline decode exposure, Eq.~\eqref{eq:baseline_integrated_exposures_dec} \\[0.5ex]
+
+$\Delta^{(m)}(t)$ & sec/step & iteration-$m$ local step-time model, Eq.~\eqref{eq:local_step_time_m} \\
+$\lambda^{(m)}(t)$ & steps/sec & iteration-$m$ step density, $\lambda^{(m)}(t)=1/\Delta^{(m)}(t)$, Eq.~\eqref{eq:step_density_m} \\[0.5ex]
+
+$q_i^{(m)}(t)$ & 1/sec & iteration-$m$ phase time-density proportional to $\lambda^{(m)}$ over $[t_{i,s},t_{i,e})$ \\
+$q_r^{(m)}(t)$ & 1/sec & iteration-$m$ request time-density proportional to $\lambda^{(m)}$ over $[t_{r,s},t_{r,e})$ \\
+$\mathcal{W}_r^{(m)}$ & time subset & iteration-$m$ last-step window for request $r$, Eq.~\eqref{eq:last_step_window_m} \\[0.5ex]
+
+$c_r^{(m)}(t)$ & tokens/sec & iteration-$m$ request-level correction signal, Eq.~\eqref{eq:cr_beta_informed_m} \\
+$c^{(m)}(t)$ & tokens/sec & iteration-$m$ aggregate correction signal, $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$ \\
+$\tilde p^{\mathrm{pf},(m)}(t)$ & tokens/step & iteration-$m$ effective prefill pressure, Eq.~\eqref{eq:prefill_pressure_beta_informed_m} \\[0.5ex]
+
+$\bar p_i^{\mathrm{pf},(m)}$ & tokens/step & iteration-$m$ step-averaged prefill pressure, Eq.~\eqref{eq:step_averaged_pressures_m} \\
+$\bar p_i^{\mathrm{dec},(m)}$ & tokens/step & iteration-$m$ step-averaged decode pressure, Eq.~\eqref{eq:step_averaged_pressures_m} \\[0.5ex]
+
+$\beta_0$ & sec/step & fixed per-step overhead coefficient \\
+$\beta_1,\beta_2$ & sec/token & per-token execution costs (prefill / decode) \\
+$\beta^{(m)}$ & mixed & coefficient vector at outer iteration $m$ \\
+\bottomrule
+\end{tabular}
+\caption{Notation and units used in trace-only step-level coefficient estimation.}
+\label{tab:notation_summary}
+\end{table}
+
+
 
 % ============================================================
 \subsection{Problem Setup and Step-Level Model}
@@ -801,23 +315,29 @@ single request.
 
 For each phase instance $i$, the trace provides:
 \begin{itemize}
-  \item the phase type (\textit{prefill} or \textit{decode}),
+  \item the request id $r_i$
+  \item the phase type $\tau_i$ (\textit{prefill} or \textit{decode}),
   \item a start time $t_{i,s}$ and end time $t_{i,e}$,
-  \item an observed phase duration $T_i = t_{i,e} - t_{i,s}$,
+  \item an observed phase duration $\ell_i = t_{i,e} - t_{i,s}$,
   \item aggregate token counts associated with the phase, including the number
         of \emph{prefill tokens} or \emph{decode tokens}.
 \end{itemize}
 
-From this information, we derive a step count $N_i \in \mathbb{N}$.
+For a phase instance $i$ associated with request $r_i$, we denote by $P_{r_i}$
+the total number of prefill tokens for that request and by $D_{r_i}$ the total
+number of decode tokens for its decode phase. Since each phase 
+instance uniquely identifies its request, we write $P_r$ 
+(prefill tokens of request $r$) and $D_r$ (decode tokens of request $r$) 
+without ambiguity. From this 
+information, we derive a step count $N_i \in \mathbb{N}$.
 For a decode phase, execution proceeds one token per step, and hence
 $N_i$ equals the number of decode tokens.
 For a prefill phase, execution is chunked: under a prefill chunk size $C$,
 a standard trace-inferred choice is
-$N_i = \lceil P_i / C \rceil$,
-where $P_i$ denotes the number of prefill tokens that induce computation.\footnote{
+$N_i = \lceil P_r / C \rceil$.\footnote{
 Prefix-cached tokens do not contribute to execution steps and are therefore
-excluded from $P_i$. This treatment is consistent with the execution semantics
-of vLLM-style inference engines~\cite{vllm}.
+excluded from $P_r$. This treatment is consistent with the execution semantics
+of vLLM-style inference engines.
 }
 
 % ============================================================
@@ -873,19 +393,49 @@ Solving this regression produces a single, globally consistent set of execution
 coefficients from trace-only data and provides the starting point for the
 step-density–reweighted refinements introduced next.
 
-\paragraph{Token pressures.} Let
-\begin{itemize}
-  \item $p^{\mathrm{pf}}(t)$ denote the total number of prefill tokens
-        processed \emph{per step} at time $t$,
-  \item $p^{\mathrm{dec}}(t)$ denote the total number of decode tokens
-        processed \emph{per step} at time $t$.
-\end{itemize}
-These functions are reconstructed deterministically from traces using
-request overlap, known per-request token counts, and the engine’s
-scheduling semantics.
-They are expressed in units of tokens per step (not tokens per unit time).
+\paragraph{Trace-only attribution (important).}
+All densities introduced below (e.g., $q_i$ and $q_r$) are \emph{attribution models} that allocate
+\emph{latent step exposure} over wall-clock time using only trace-visible phase boundaries.
+They are not claims about true step boundaries or per-step timings; the estimator uses them only through
+time integrals on the trace-induced grid.
 
-\subsubsection{Prefill Chunking and Partial-Chunk Correction}
+
+\paragraph{Terminology: instantaneous quantities and exposures.}
+We distinguish between \emph{instantaneous} quantities, which are defined as
+functions of wall-clock time $t$ on the trace-induced grid, and
+\emph{exposures}, which are obtained by integrating instantaneous quantities
+over a phase window and serve as regression features.
+Instantaneous \emph{pressures} quantify work performed per execution step
+(tokens/step). The \emph{step density} $\lambda^{(m)}(t)$ (steps/sec) quantifies
+how frequently busy-loop steps occur in wall-clock time under the iteration-$m$
+local step-time model (Section~\ref{sec:local_step_density}).
+Exposures are phase- or request-level scalars with units of tokens, obtained
+either by converting time-integrated pressures using a step density proxy
+(baseline) or by aggregating step-averaged pressures over a fixed step count
+(iterative estimator).
+Throughout, all quantities are defined and combined in a manner consistent
+with their physical units.
+
+
+\paragraph{Instantaneous token pressures.}
+We define two trace-derived, piecewise-constant \emph{instantaneous pressures}
+(tokens/step) on the trace-induced time grid.
+The decode pressure $p^{\mathrm{dec}}(t)$ is the total decode-token work that would
+be attributed to a representative busy-loop step executed at wall-clock time $t$,
+given the set of requests whose trace-visible decode phases overlap $t$.
+For prefill, we use the \emph{naive full-chunk} pressure
+\[
+p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t),
+\]
+which treats each active prefill request as contributing $C$ tokens per step.
+Any accounting for the final partial prefill chunk is represented separately,
+either through a correction \emph{in exposure space} in the baseline
+(via $c(t)$), or through an \emph{iteration-indexed effective pressure}
+$\tilde p^{\mathrm{pf},(m)}(t)$ constructed during iteration $m$ from the
+\emph{previous} iterate $\beta^{(m-1)}$ via the induced step density
+(Section~\ref{sec:beta_informed_prefill_correction}).
+
+\subsubsection{Prefill Chunking and Partial-Chunk Correction Signals}
 \label{sec:prefill_correction}
 
 Decode contributes exactly one token per active request per step.
@@ -925,65 +475,65 @@ This option serves as a natural ablation: it is fully trace-only, requires no
 additional assumptions about where the final prefill step occurs in time, and
 provides a lower bound on estimator fidelity when chunking effects are mild.
 
-\paragraph{Uniform redistribution correction.}
+\paragraph{Uniform redistribution correction (implemented in integrated form).}
 A more refined baseline accounts for the missing mass $\mu_r$ by redistributing
-it uniformly over the prefill interval of request $r$.
+it uniformly over the prefill interval of request $r$, but it does so in a way
+that is dimensionally consistent with the baseline feature construction.
+
 Let $[t_{r,s}, t_{r,e})$ denote the trace-visible prefill interval of request $r$.
-Define a correction weight
-\[
-w_r(t)
-=
-\begin{cases}
-\frac{1}{t_{r,e}-t_{r,s}}, & t\in[t_{r,s},t_{r,e}),\\
-0, & \text{otherwise},
-\end{cases}
-\]
-which satisfies $\int w_r(t)\,dt = 1$.
-
-The effective prefill pressure is then
+Define a \emph{correction signal} (tokens/second)
 \begin{equation}
-\tilde p^{\mathrm{pf}}(t)
+c_r^{\mathrm{uni}}(t)
 =
-p^{\mathrm{pf}}_{\mathrm{full}}(t)
--
-\sum_r \mu_r\, w_r(t).
-\label{eq:uniform_prefill_pressure}
+\frac{\mu_r}{t_{r,e}-t_{r,s}}\,
+\mathbf{1}\{t\in[t_{r,s},t_{r,e})\},
+\qquad
+\text{units: tokens/second},
+\label{eq:uniform_corr_signal}
 \end{equation}
-This construction preserves total prefill token mass exactly while avoiding any
-assumption about the precise temporal location of the final prefill step.
-Uniform redistribution is therefore a conservative, smoothing correction that
-depends only on trace-visible phase boundaries.
-
-\paragraph{End-localized partial-chunk correction.}
-Uniform redistribution implicitly assumes that the final prefill step is equally
-likely to occur anywhere within the prefill interval.
-An alternative trace-only assumption is that the final prefill step completes
-near the trace-visible end of the prefill phase.
-
-Let $t_{r,e}$ denote the end timestamp of request $r$’s prefill phase, and let
-$\mathcal{I}(t_{r,e})$ denote the smallest time-grid interval (induced by trace
-phase boundaries) that contains $t_{r,e}$.
-The end-localized correction assigns the entire missing mass $\mu_r$ to that
-interval.
-
-Equivalently, this corresponds to choosing a correction weight $w_r(t)$ that is
-supported on $\mathcal{I}(t_{r,e})$ and normalized such that
-$\int w_r(t)\,dt = 1$.
-The resulting effective prefill pressure again takes the form
+and let the aggregate correction signal be
 \begin{equation}
-\tilde p^{\mathrm{pf}}(t)
-=
-p^{\mathrm{pf}}_{\mathrm{full}}(t)
--
-\sum_r \mu_r\, w_r(t),
+c^{\mathrm{uni}}(t)=\sum_r c_r^{\mathrm{uni}}(t).
+\label{eq:uniform_corr_signal_sum}
 \end{equation}
-but with $w_r(t)$ concentrated near the end of prefill rather than spread
-uniformly.
+By construction, $\int_{t_{r,s}}^{t_{r,e}} c_r^{\mathrm{uni}}(t)\,dt=\mu_r$,
+so total missing token mass is preserved exactly when integrating over time.
 
-This end-localized correction reflects the intuition that the final prefill
-iteration must occur immediately prior to the recorded prefill completion time,
-while remaining fully trace-only and avoiding any reconstruction of global step
-boundaries.
+\paragraph{End-localized partial-chunk correction (implemented on the trace grid).}
+Uniform redistribution implicitly assumes the final prefill step could occur
+anywhere within the prefill interval. An alternative trace-only assumption is
+that the final prefill step completes near the trace-visible end time $t_{r,e}$.
+
+Let $\{[g_j,g_{j+1})\}$ denote the trace-induced time grid formed by all phase
+boundaries, and let $j(r)$ be the index of the unique grid segment containing
+$t_{r,e}$ (under the half-open convention, with boundary clamping at the end).
+Define the per-request end-localized correction signal (tokens/second)
+\begin{equation}
+c_r^{\mathrm{end}}(t)
+=
+\frac{\mu_r}{g_{j(r)+1}-g_{j(r)}}\,
+\mathbf{1}\{t\in[g_{j(r)},g_{j(r)+1})\},
+\qquad
+\text{units: tokens/second},
+\label{eq:end_corr_signal}
+\end{equation}
+and the aggregate correction signal
+\begin{equation}
+c^{\mathrm{end}}(t)=\sum_r c_r^{\mathrm{end}}(t).
+\label{eq:end_corr_signal_sum}
+\end{equation}
+Again, $\int c_r^{\mathrm{end}}(t)\,dt=\mu_r$ by construction.
+
+\paragraph{Remark (why we use correction signals in the baseline).}
+In the baseline, instantaneous token pressures are represented in units of
+tokens/step and only enter the estimator through time integrals that are
+subsequently converted into token totals via the phase-local step-density proxy
+$\widehat\lambda_i$ (Eq.~\eqref{eq:baseline_lambda_hat}). The partial-chunk 
+correction is therefore represented as a \emph{time-based}
+correction signal $c(t)$ (tokens/sec) so that its time integral is 
+directly in tokens and can be subtracted in exposure space without introducing any
+step-boundary assumptions.
+
 
 \paragraph{Implementation note (no pointwise reconstruction required).}
 Although we define token pressures and correction weights as functions of
@@ -991,7 +541,9 @@ wall-clock time, the baseline estimator never requires evaluating them
 instantaneously.
 All quantities enter the estimator only through time integrals over phase
 intervals, such as
-$\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\,dt$.
+$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt$
+and
+$\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt$.
 These integrals can be computed exactly from trace-visible phase boundaries by
 sweeping over a piecewise-constant time grid and applying per-request correction
 masses whose placement within a grid interval does not affect correctness.
@@ -1010,45 +562,96 @@ $\beta_1,\beta_2$ retain the interpretation ``seconds per token''---we
 convert time integrals into approximate \emph{step integrals} using a
 phase-local constant step density.
 
+\begin{algorithm}[t]
+\caption{Baseline trace-only estimation}
+\label{alg:baseline_intuition}
+\begin{algorithmic}[1]
+\Require Phase traces $\{(r_i,\tau_i,t_{i,s},t_{i,e},P_{r_i},D_{r_i})\}$, chunk size $C$
+\Ensure Estimated execution coefficients $\hat\beta$
+
+\For{each phase instance $i$}
+  \State infer step count $N_i$ from trace-visible tokens
+  \Comment{definition of $N_i$; §\ref{sec:problem_setup}}
+\EndFor
+
+\State construct global time grid from all phase boundaries
+\Comment{trace-induced grid for piecewise-constant instantaneous pressures; §\ref{sec:pressures}}
+
+\For{each time interval in the grid}
+  \State measure concurrent prefill and decode activity
+  \Comment{overlap $\Rightarrow$ \emph{instantaneous} pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t),p^{\mathrm{dec}}(t)$ on the grid; §\ref{sec:pressures}}
+\EndFor
+
+\For{each prefill request $r$}
+  \State apply trace-only partial-chunk correction (optional)
+  \Comment{missing mass $\mu_r$ and trace-only correction signal $c(t)$ (tokens/sec); §\ref{sec:prefill_correction}, Eq.~\eqref{eq:rho_def}, Eq.~\eqref{eq:uniform_corr_signal_sum}/Eq.~\eqref{eq:end_corr_signal_sum}}
+\EndFor
+
+\For{each phase instance $i$}
+  \State compute phase-level prefill and decode exposures
+  \Comment{baseline exposures $A_i^{\mathrm{pf}},A_i^{\mathrm{dec}}$ from instantaneous pressures and phase-local step density; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_lambda_hat}, Eq.~\eqref{eq:baseline_integrated_exposures_pf}, Eq.~\eqref{eq:baseline_integrated_exposures_dec}}
+\EndFor
+
+\State fit execution coefficients via NNLS
+\Comment{baseline predictor and NNLS objective; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_predictor}, Eq.~\eqref{eq:baseline_nnls}}
+
+\State \Return $\hat\beta$
+\end{algorithmic}
+\end{algorithm}
+
+
+
 \paragraph{Phase-local step density.}
-For phase instance $i$, let $T_i=t_{i,e}-t_{i,s}$ be its observed duration and
+For phase instance $i$, let $\ell_i=t_{i,e}-t_{i,s}$ be its observed duration and
 let $N_i\in\mathbb{N}$ be the trace-inferred step count.
-We define the (phase-local) step density proxy
+We define the (phase-local) \emph{step density proxy} (steps/sec)
 \begin{equation}
-\widehat\lambda_i \;=\; \frac{N_i}{T_i},
-\qquad
-\text{units: steps/second}.
+\widehat\lambda_i \;=\; \frac{N_i}{\ell_i}.
 \label{eq:baseline_lambda_hat}
 \end{equation}
+
 This assumes steps are spread approximately uniformly over the phase window,
 and is used \emph{only} to convert time integrals into step-aggregated token
-totals in the baseline.\footnote{Implementation detail: to avoid extreme $\widehat{\lambda}_i$ when $T_i$
-is very small, we may compute $\widehat{\lambda}_i = N_i/\max\{T_i, T_{\min}\}$ for a
-small $T_{\min}\ge 0$. The default $T_{\min}=0$ recovers Eq.~\eqref{eq:baseline_lambda_hat}.}
+totals in the baseline.\footnote{Implementation detail: to avoid extreme $\widehat{\lambda}_i$ when $\ell_i$
+is very small, we may compute $\widehat{\lambda}_i = N_i/\max\{\ell_i, \ell_{\min}\}$ for a
+small $\ell_{\min}\ge 0$. The default $\ell_{\min}=0$ recovers Eq.~\eqref{eq:baseline_lambda_hat}.} 
+We emphasize that $\widehat{\lambda}_i$ is a surrogate step-density used only
+to convert time-integrated pressures into step-aggregated token exposures.
 
 
-\paragraph{Integrated token exposures (baseline features).}
-We define baseline integrated exposures
+\paragraph{Phase-level exposures (baseline regression features).}
+Let $p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t)$ denote the naive full-chunk
+prefill pressure (tokens/step), and let $p^{\mathrm{dec}}(t)$ denote the decode
+pressure (tokens/step). Let $c(t)$ denote a chosen partial-chunk correction signal
+(tokens/second), e.g., $c^{\mathrm{uni}}(t)$ from Eq.~\eqref{eq:uniform_corr_signal_sum},
+$c^{\mathrm{end}}(t)$ from Eq.~\eqref{eq:end_corr_signal_sum}, or $c(t)\equiv 0$ (ablation).
+
+We define baseline phase-level exposures (tokens) as
 \begin{align}
 A^{\mathrm{pf}}_i
 &=
-\int_{t_{i,s}}^{t_{i,e}}
-\tilde p^{\mathrm{pf}}(t)\,\widehat\lambda_i\,dt,
-&
+\left[ \widehat\lambda_i
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt \right]
+\;-\;
+\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt,
+\label{eq:baseline_integrated_exposures_pf}
+\\
 A^{\mathrm{dec}}_i
 &=
-\int_{t_{i,s}}^{t_{i,e}}
-p^{\mathrm{dec}}(t)\,\widehat\lambda_i\,dt,
-\label{eq:baseline_integrated_exposures}
+\widehat\lambda_i
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt.
+\label{eq:baseline_integrated_exposures_dec}
 \end{align}
-which have units of tokens because $\tilde p^{\mathrm{pf}}(t)$ and
-$p^{\mathrm{dec}}(t)$ are in tokens/step and $\widehat\lambda_i$ is in
-steps/second.
+The integrals of $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and $p^{\mathrm{dec}}(t)$ have
+units $(\text{tokens}/\text{step})\cdot \text{seconds}$, which are converted into
+tokens by $\widehat\lambda_i$ (steps/second), while $\int c(t)\,dt$ is already in tokens.
+Accordingly, the correction term is \emph{not} multiplied by $\widehat\lambda_i$.
+
 
 \paragraph{Baseline predictor.}
 The baseline predicts phase duration as
 \begin{equation}
-\widehat T_i(\beta)
+\widehat \ell_i(\beta)
 =
 \beta_0\,N_i
 +
@@ -1068,7 +671,7 @@ non-negative least squares:
 \min_{\beta \in \mathbb{R}^3_{\ge 0}}
 \sum_{i\in\mathcal{I}}
 \left(
-\widehat T_i(\beta) - T_i
+\widehat \ell_i(\beta) - \ell_i
 \right)^2 .
 \label{eq:baseline_nnls}
 \end{equation}
@@ -1078,68 +681,11 @@ and KV-cache dynamics; the only information learned from traces is the
 estimated $\beta$, which parameterizes the simulator but does not 
 encode any trace-specific timing information.
 
-The pseudocode for the baseline estimation procedure is in 
-Algorithm \ref{alg:baseline}.
-
-\begin{algorithm}[t]
-\caption{Baseline algorithm for trace-only estimation}
-\label{alg:baseline}
-\begin{algorithmic}[1]
-\Require Instances $\{(\text{request id }r_i,\ \text{type }\tau_i\in\{\textsf{prefill},\textsf{decode}\},\ t_{i,s},t_{i,e},\ P_i,D_i)\}_{i=1}^n$, chunk size $C$.
-\Ensure $\hat\beta=(\hat\beta_0,\hat\beta_1,\hat\beta_2)\in\mathbb{R}^3_{\ge 0}$.
-\State \textbf{Infer step counts.} $N_i\gets \lceil P_i/C\rceil$ if $\tau_i=\textsf{prefill}$; else $N_i\gets D_i$.
-\State \textbf{Durations and step density.} $T_i\gets t_{i,e}-t_{i,s}$; $\widehat\lambda_i\gets N_i/T_i$.
-\State \textbf{Global time grid.} $\mathcal{G}=\{g_0<\dots<g_M\}\gets\mathrm{sort}\big(\{t_{i,s}\}_i\cup\{t_{i,e}\}_i\big)$; segments are $[g_j,g_{j+1})$.
-\State \textbf{Piecewise-constant signals on segments.} For each segment $j=0,\dots,M-1$:
-\[
-\begin{aligned}
-p^{\mathrm{pf}}_{\mathrm{full},j}
-&\gets C \cdot \bigl(\#\text{ requests prefilling during }[g_j,g_{j+1})\bigr),\\
-p^{\mathrm{dec}}_{j}
-&\gets \bigl(\#\text{ requests decoding during }[g_j,g_{j+1})\bigr).
-\end{aligned}
-\]
-\State \textbf{Prefill correction (uniform redistribution).}
-\For{each request $r$}
-  \State Let $i$ denote the (unique) \textsf{prefill} phase instance of request $r$.
-  \State Set missing mass $\mu_r \gets C N_i - P_i$ and uniform rate
-  $\nu_r \gets \mu_r/(t_{i,e}-t_{i,s})$ \quad (tokens/sec).
-\EndFor
-\State For each segment $[g_j,g_{j+1})$, set the aggregate correction rate (tokens/sec)
-\[
-\begin{aligned}
-u_j \;\;&\gets \sum_r \nu_r,
-\quad \text{where the sum is over all requests $r$ whose \textsf{prefill} interval overlaps with }[g_j,g_{j+1}) .
-\end{aligned}
-\]
-\For{each phase instance $i$}
-  \State Let $\mathcal{J}(i)$ be the set of grid segments $j$ whose interval
-  $[g_j,g_{j+1})$ overlaps the phase window $[t_{i,s},t_{i,e})$.
-  \State For each $j\in\mathcal{J}(i)$, let
-  $\Delta t_{ij} \gets \bigl|\,[t_{i,s},t_{i,e})\cap[g_j,g_{j+1})\,\bigr|$.
-  \State Compute exact segment sums:
-  \[
-  \begin{aligned}
-  J^{\mathrm{pf}}_i &\gets \sum_{j\in\mathcal{J}(i)} p^{\mathrm{pf}}_{\mathrm{full},j}\,\Delta t_{ij},\\
-  J^{\mathrm{dec}}_i &\gets \sum_{j\in\mathcal{J}(i)} p^{\mathrm{dec}}_{j}\,\Delta t_{ij},\\
-  U_i &\gets \sum_{j\in\mathcal{J}(i)} u_j\,\Delta t_{ij}.
-  \end{aligned}
-  \]
-  \State Convert to token exposures:
-  $A^{\mathrm{pf}}_i\gets \widehat\lambda_i J^{\mathrm{pf}}_i-U_i$,\;
-  $A^{\mathrm{dec}}_i\gets \widehat\lambda_i J^{\mathrm{dec}}_i$.
-\EndFor
-\State \textbf{NNLS fit.}
-$\hat\beta\gets\arg\min_{\beta\ge0}\sum_i(\beta_0N_i+\beta_1A^{\mathrm{pf}}_i+\beta_2A^{\mathrm{dec}}_i-T_i)^2$.
-\State \Return $\hat\beta$.
-\end{algorithmic}
-\end{algorithm}
-
-
-
-\paragraph{Limitation of the baseline.}
-This estimator remains wall-clock--weighted because $A_i^{\mathrm{pf}}$ and
-$A_i^{\mathrm{dec}}$ are formed by integrating over time within each phase,
+\paragraph{Why reweighting helps.}
+This estimator remains wall-clock--weighted because the baseline exposures 
+$A_i^{\mathrm{pf}}$ and $A_i^{\mathrm{dec}}$ are formed
+by integrating instantaneous pressures over wall-clock time 
+within each phase,
 using the phase-average step density proxy $\widehat\lambda_i$ rather than a
 time-varying step density.
 As a result, phases that coincide with long-step periods can exert
@@ -1152,107 +698,269 @@ in Section~\ref{sec:step_density}.
 \label{sec:step_density}
 
 We now introduce an iterative estimator that shifts fitting from wall-clock
-weighting toward step-level weighting.
+weighting toward step-level weighting. The step-density reweighted estimator can be combined with any of the
+trace-only prefill correction schemes from
+Section~\ref{sec:prefill_correction}.
+In addition, it enables a $\beta$-informed refinement that localizes the
+prefill partial chunk using the inferred step-density model.
 
-\subsubsection{Local Step-Time Model and Step Density}
+\begin{algorithm}[t]
+\caption{Iterative step-density reweighted estimation}
+\label{alg:iterative_intuition}
+\begin{algorithmic}[1]
+\Require Phase traces, chunk size $C$, initial coefficients $\beta^{(0)}$, tolerance $\epsilon$
+\Ensure Refined execution coefficients $\beta^\star$
 
-Given instantaneous pressures, we model the (latent) step duration at time $t$ as
-\begin{equation}
-\Delta(t;\beta)
-=
-\beta_0
-+
-\beta_1\,\tilde p^{\mathrm{pf}}(t)
-+
-\beta_2\,p^{\mathrm{dec}}(t),
-\qquad \Delta(t;\beta) > 0.
-\label{eq:local_step_time}
-\end{equation}
+\State initialize $\beta^{(0)} \gets$ baseline NNLS estimate
+\Comment{§\ref{sec:baseline}, Eq.~\eqref{eq:baseline_nnls}}
 
-Thus, $\Delta(t;\beta)$ represents the instantaneous duration of a busy-loop
-step that would be executed at time $t$ given the token pressures observed at
-that moment and execution coefficients $\beta$.
+\For{$m=1,2,\dots$}
+  \State compute $\Delta^{(m)}(t)$ and $\lambda^{(m)}(t)$ from $\beta^{(m-1)}$
+  \Comment{\emph{instantaneous} step-time and step-density on the trace grid; §\ref{sec:local_step_density}, Eq.~\eqref{eq:local_step_time_m}, Eq.~\eqref{eq:step_density_m}}
 
+  \State assign step exposure across time intervals
+  \Comment{compute phase/request attribution densities $q_i^{(m)},q_r^{(m)}$ from $\lambda^{(m)}$ on the trace grid; §\ref{sec:local_step_density}}
 
-The corresponding step density is
-\begin{equation}
-\lambda(t;\beta) = \frac{1}{\Delta(t;\beta)}.
-\label{eq:step_density}
-\end{equation}
+  \For{each prefill request $r$}
+    \State localize final partial chunk using step density
+    \Comment{$\beta$-informed placement of missing prefill tokens within the prefill window via request-level attribution and last-step window; §\ref{sec:beta_informed_prefill_correction}, Eq.~\eqref{eq:qr_def_m}--Eq.~\eqref{eq:last_step_window_m}}
+  \EndFor
 
-\subsubsection{Normalized Step Density within a Phase}
+  \For{each phase instance $i$}
+    \State compute step-averaged prefill and decode pressures
+    \Comment{step-averaged (i.e., step-weighted) pressures from \emph{instantaneous} pressures and phase-level attribution; §\ref{sec:step_averaged_pressures}, Eq.~\eqref{eq:step_averaged_pressures_m}}
+  \EndFor
 
-For phase instance $i$, define
+  \State refit $\beta^{(m)}$ using frozen iteration-$m$ features
+  \Comment{NNLS on step-weighted exposures $N_i\bar p_i^{\mathrm{pf}}$ and $N_i\bar p_i^{\mathrm{dec}}$ (tokens), holding attribution fixed; §\ref{sec:step_density}, Eq.~\eqref{eq:sr_nnls_m}}
+
+  \If{$\|\beta^{(m)}-\beta^{(m-1)}\|_2 < \epsilon$} 
+    \State \textbf{break}
+  \EndIf
+\EndFor
+
+\State set $\beta^\star \gets \beta^{(m)}$
+\State \Return $\beta^\star$
+
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Iteration semantics.}
+At the start of iteration $m$, the coefficient vector $\beta^{(m-1)}$ and all
+features computed in iteration $m-1$ are available.
+All quantities carrying superscript $m$ are computed \emph{during} iteration
+$m$ using $\beta^{(m-1)}$ and previously computed features, and are held fixed
+while solving for $\beta^{(m)}$.
+
+\paragraph{Update map interpretation.}
+The iterative estimator can be viewed as the repeated application of a
+deterministic update map.
+Specifically, given the previous iterate and lagged effective prefill pressure,
+the algorithm applies
 \[
-\Lambda_i(\beta)
-=
-\int_{t_{i,s}}^{t_{i,e}} \lambda(t;\beta)\,dt,
-\qquad
-q_i(t;\beta)
-=
-\frac{\lambda(t;\beta)}{\Lambda_i(\beta)}.
+(\beta^{(m-1)},\tilde p^{\mathrm{pf},(m-1)})
+\;\xmapsto{\;\mathcal{T}\;}
+(\beta^{(m)},\tilde p^{\mathrm{pf},(m)}),
 \]
-By construction, $\int q_i(t;\beta)\,dt = 1$.
-We treat $N_i$ as fixed and use $q_i(t;\beta)$ only as a trace-only
-\emph{step-time attribution model} within the observed phase window; 
-in other words, $q_i$ estimates where those steps occur in time.
+where the update map $\mathcal{T}$ is realized through the following
+trace-only construction chain:
+\begin{align*}
+& \beta^{(m-1)}
+\;\mapsto\;
+\Delta^{(m)}(t)
+\;\mapsto\;
+\lambda^{(m)}(t)
+\;\mapsto\; 
+\bigl(q_i^{(m)}(t), q_r^{(m)}(t), F_r^{(m)}(t), \mathcal{W}_r^{(m)}\bigr)
+\;\mapsto\; \\
+& \bigl(c_r^{(m)}(t), c^{(m)}(t), \tilde p^{\mathrm{pf},(m)}(t)\bigr)
+\;\mapsto\;
+\bigl(\bar p_i^{\mathrm{pf},(m)}, \bar p_i^{\mathrm{dec},(m)}\bigr)
+\;\mapsto\;
+\beta^{(m)}.
+\end{align*}
+All quantities with superscript $(m)$ are computed during iteration $m$ from
+$\beta^{(m-1)}$ and trace-derived signals, then held fixed while solving the
+NNLS subproblem for $\beta^{(m)}$.
 
-\subsubsection{Step-Averaged Pressures}
 
-Define
+\subsubsection{Local Step-Time Model and Step Density (Iteration-Indexed)}
+\label{sec:local_step_density}
+
+The iterative estimator proceeds in outer iterations indexed by $m$.
+At the start of iteration $m$, we treat the current coefficient vector $\beta^{(m-1)}$
+as fixed and construct a trace-only step-density proxy on the trace-induced
+time grid. All attribution quantities computed from this proxy (e.g.,
+$q_i^{(m)}$, $q_r^{(m)}$, $\mathcal{W}_r^{(m)}$, $c^{(m)}$, and
+$\bar p_i^{(\cdot),(m)}$) are then held fixed while solving for $\beta^{(m)}$
+via an NNLS subproblem.
+
+Given instantaneous pressures and the effective prefill pressure $\tilde p^{\mathrm{pf},(m-1)}(t)$
+computed in the previous iteration (and held fixed), define the iteration-$m$
+local step-time model as
 \begin{equation}
-\bar p^{\mathrm{pf}}_i(\beta)
+\Delta^{(m)}(t)
 =
-\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf}}(t)\, q_i(t;\beta)\,dt,
-\qquad
-\bar p^{\mathrm{dec}}_i(\beta)
-=
-\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i(t;\beta)\,dt.
-\label{eq:step_averaged_pressures}
+\beta^{(m-1)}_0
++
+\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}(t)
++
+\beta^{(m-1)}_2\,p^{\mathrm{dec}}(t),
+\qquad \Delta^{(m)}(t) > 0.
+\label{eq:local_step_time_m}
 \end{equation}
 
-Note that $\bar p_i^{\mathrm{pf}}(\beta)$ retains units of tokens/step, so
-$N_i\bar p_i^{\mathrm{pf}}(\beta)$ is an \emph{effective step-aggregated prefill exposure}
-for phase $i$ under the step-timing model $\lambda(t;\beta)$.
-In the special case of approximately uniform step density within the phase,
-this reduces to the baseline exposure $A_i^{\mathrm{pf}}$ (up to numerical integration error).
+The induced \emph{step density} (steps/sec) is
+\begin{equation}
+\lambda^{(m)}(t) = \frac{1}{\Delta^{(m)}(t)}.
+\label{eq:step_density_m}
+\end{equation}
+
+% ============================================================
+\subsubsection{$\beta$-Informed Partial-Chunk Correction (Iteration-Indexed)}
+\label{sec:beta_informed_prefill_correction}
+
+Using $\lambda^{(m)}(t)$ from Eq.~\eqref{eq:step_density_m}, define the
+normalized step-time attribution density over request $r$'s prefill window:
+\begin{equation}
+q_r^{(m)}(t)
+=
+\frac{\lambda^{(m)}(t)}{\int_{t_{r,s}}^{t_{r,e}} \lambda^{(m)}(u)\,du},
+\qquad
+\int_{t_{r,s}}^{t_{r,e}} q_r^{(m)}(t)\,dt = 1.
+\label{eq:qr_def_m}
+\end{equation}
+
+Define the corresponding CDF
+\begin{equation}
+F_r^{(m)}(t)=\int_{t_{r,s}}^{t} q_r^{(m)}(u)\,du,
+\label{eq:Fr_def_m}
+\end{equation}
+and the last-step window as
+\begin{equation}
+\mathcal{W}_r^{(m)}
+=
+\Bigl\{
+t\in[t_{r,s},t_{r,e})
+:
+F_r^{(m)}(t)\ge 1-\tfrac{1}{N_r}
+\Bigr\}.
+\label{eq:last_step_window_m}
+\end{equation}
+
+The per-request correction signal (tokens/sec) is
+\begin{equation}
+c_r^{(m)}(t)
+=
+\mu_r\,
+\frac{q_r^{(m)}(t)\,\mathbf{1}\{t\in\mathcal{W}_r^{(m)}\}}
+{\int_{\mathcal{W}_r^{(m)}} q_r^{(m)}(u)\,du},
+\label{eq:cr_beta_informed_m}
+\end{equation}
+with aggregate correction $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$.
+
+The effective prefill pressure is
+\begin{equation}
+\tilde p^{\mathrm{pf},(m)}(t)
+=
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+-
+\frac{c^{(m)}(t)}{\lambda^{(m)}(t)}.
+\label{eq:prefill_pressure_beta_informed_m}
+\end{equation}
+
+Since $c^{(m)}(t)/\lambda^{(m)}(t)$ has units
+$(\text{tokens}/\text{second})/(\text{steps}/\text{second})=\text{tokens}/\text{step}$,
+$\tilde p^{\mathrm{pf},(m)}(t)$ remains a tokens/step pressure.
+
+We note that all instantaneous quantities above enter only through integrals over the trace-induced grid
+$\{[g_j,g_{j+1})\}$, on which pressures (and hence $\lambda^{(m)}$) are piecewise-constant.
+
+\subsubsection{Normalized Step Density within a Phase (Iteration-Indexed)}
+
+For phase instance $i$, define the iteration-$(m)$ phase mass
+\[
+\Lambda_i^{(m)}
+=
+\int_{t_{i,s}}^{t_{i,e}} \lambda^{(m)}(t)\,dt,
+\qquad
+q_i^{(m)}(t)
+=
+\frac{\lambda^{(m)}(t)}{\Lambda_i^{(m)}}.
+\]
+By construction, $\int_{t_{i,s}}^{t_{i,e}} q_i^{(m)}(t)\,dt = 1$.
+All phase-level attribution quantities are computed during iteration $m$
+and held fixed while solving for $\beta^{(m)}$.
+
+\subsubsection{Step-Weighted Exposures}
+\label{sec:step_averaged_pressures}
+
+\begin{equation}
+\bar p^{\mathrm{pf},(m)}_i
+=
+\int_{t_{i,s}}^{t_{i,e}} \tilde p^{\mathrm{pf},(m)}(t)\, q_i^{(m)}(t)\,dt,
+\qquad
+\bar p^{\mathrm{dec},(m)}_i
+=
+\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i^{(m)}(t)\,dt.
+\label{eq:step_averaged_pressures_m}
+\end{equation}
+
+\paragraph{From step-averaged pressure to exposure.}
+The quantities $\bar p_i^{\mathrm{pf},(m)}$ and $\bar p_i^{\mathrm{dec},(m)}$
+are \emph{step-averaged pressures} (tokens/step), obtained by averaging
+instantaneous pressures with respect to the iteration-$m$ step-time attribution
+$q_i^{(m)}(t)$.
+The corresponding \emph{step-weighted exposures} used in the NNLS subproblem are
+$N_i\bar p_i^{\mathrm{pf},(m)}$ and $N_i\bar p_i^{\mathrm{dec},(m)}$ (tokens).
+
+In the special case where $\lambda^{(m)}(t)$ is approximately constant over
+$[t_{i,s},t_{i,e})$, the step-time attribution is approximately uniform and the
+resulting step-weighted exposures reduce to the baseline construction (up to
+numerical integration error).
+
+\paragraph{Units and interpretation.}
+$\bar p_i^{\mathrm{pf},(m)}$ and $\bar p_i^{\mathrm{dec},(m)}$ have units of tokens/step,
+so $N_i\bar p_i^{\mathrm{pf},(m)}$ and $N_i\bar p_i^{\mathrm{dec},(m)}$ are step-aggregated
+token exposures (tokens) for phase $i$ under the iteration-$m$ attribution induced by
+$\lambda^{(m)}(t)$.
+If $\lambda^{(m)}(t)$ is approximately constant over $[t_{i,s},t_{i,e})$, then
+$q_i^{(m)}(t)$ is approximately uniform and these step-weighted exposures reduce to the
+baseline construction (up to numerical integration error and any chosen prefill correction).
 
 
 \subsubsection{MM-Style Iterative NNLS}
 
-At iteration $r$, we freeze the step-averaged pressures computed using
-$\beta^{(r)}$ and solve
 \begin{equation}
-\beta^{(r+1)}
+\beta^{(m)}
 =
 \arg\min_{\beta\ge 0}
 \sum_{i\in\mathcal{I}}
 \left(
 N_i\beta_0
 +
-N_i\bar p^{\mathrm{pf}}_i(\beta^{(r)})\beta_1
+\bigl[N_i\bar p^{\mathrm{pf},(m)}_i\bigr]\beta_1
 +
-N_i\bar p^{\mathrm{dec}}_i(\beta^{(r)})\beta_2
+\bigl[N_i\bar p^{\mathrm{dec},(m)}_i\bigr]\beta_2
 -
-T_i
+\ell_i
 \right)^2 .
-\label{eq:sr_nnls}
+\label{eq:sr_nnls_m}
 \end{equation}
+
+where $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ are computed 
+via Eqs.~\eqref{eq:local_step_time_m}--\eqref{eq:prefill_pressure_beta_informed_m} and \eqref{eq:step_averaged_pressures_m}
+and are held fixed while optimizing over $\beta$.
+
 Optional damping
-$\beta^{(r+1)} \leftarrow (1-\eta)\beta^{(r)} + \eta\beta^{(r+1)}$
-improves numerical stability. 
-We iterate until $\|\beta^{(r+1)} - \beta^{(r)}\|_2 < \epsilon$ or a maximum
-iteration count is reached.
+$\beta^{(m)} \leftarrow (1-\eta)\beta^{(m-1)} + \eta\beta^{(m)}$
+improves numerical stability. We iterate until 
+$\|\beta^{(m)} - \beta^{(m-1)}\|_2 < \epsilon$ or a maximum
+iteration count is reached. 
 
-% ============================================================
-\subsection{Robust Estimation and Fixed-Point View}
-\label{sec:robust_fixed_point}
-
-To mitigate outliers, we optionally replace the squared loss with a Huber loss
-$\rho_\delta$.
-The resulting mapping defines a fixed-point iteration
-$\beta^{(r+1)}=\mathcal{F}(\beta^{(r)})$, terminated by relative change or a
-fixed iteration budget.
+\paragraph{Robust loss and fixed-point view.}
+To mitigate outliers, we optionally replace the squared loss in
+Eq.~\eqref{eq:sr_nnls_m} with a Huber loss $\rho_\delta$ applied to each residual.
 
 % ============================================================
 \subsection{Limitations and Scope}
@@ -1268,256 +976,7 @@ path to step-level calibration using only production traces.
 
 \paragraph{Simulator linkage.}
 The estimated coefficients $\beta^\star$ are used directly in the step-time
-model (Eq.~\ref{eq:step_model}) of the discrete-event simulator.
+model (Eq.~\eqref{eq:step_model}) of the discrete-event simulator.
 
-
-% ============================================================
-\subsection{Design of Inference Workloads for Calibration}
-\label{sec:workload_design}
-
-Identifiability of step-level execution coefficients requires sufficient
-variation in instantaneous token pressures.
-Highly homogeneous workloads may yield nearly collinear features, limiting
-estimation precision even with large trace volumes.
-We therefore explicitly design inference workloads that \emph{excite}
-distinct execution regimes during calibration windows.
-
-\subsubsection{Calibration Probes}
-
-We construct a small set of \emph{calibration probes}, each defined by a
-controlled combination of:
-\begin{itemize}
-  \item request arrival rate and burstiness,
-  \item input length distribution,
-  \item prefix hit distribution,
-  \item decode length distribution,
-  \item maximum concurrency or batch limits.
-\end{itemize}
-
-These probes are executed using standard benchmarking or workload-generation
-frameworks and produce ordinary production traces. No engine instrumentation,
-step timing, or internal counters are used.
-
-\subsubsection{Feature Diversity Objective}
-
-Let $\phi_i(\beta)$ denote the step-resolved feature vector for phase $i$:
-\[
-\phi_i(\beta)
-=
-\left(
-N_i,\;
-N_i\bar p^{\mathrm{pf}}_i(\beta),\;
-N_i\bar p^{\mathrm{dec}}_i(\beta)
-\right).
-\]
-
-Calibration probes are selected to maximize diversity among these features
-across phases, reducing collinearity between prefill, decode, and step-count
-terms. In practice, this can be achieved by:
-\begin{itemize}
-  \item mixing prefill-heavy and decode-heavy workloads,
-  \item varying concurrency independently of token lengths,
-  \item introducing controlled arrival-rate ramps or bursts.
-\end{itemize}
-
-\subsubsection{Design-of-Experiments Perspective}
-
-From a design-of-experiments viewpoint, probe selection aims to improve the
-conditioning of the regression problem.
-Simple heuristics include:
-\begin{itemize}
-  \item maximizing the determinant or minimizing the condition number of the
-        empirical feature covariance matrix,
-  \item ensuring coverage of distinct operating regimes
-        (e.g., low-load vs.\ saturation).
-\end{itemize}
-
-These criteria are evaluated using trace-derived features only and do not
-require knowledge of the true execution coefficients. These criteria 
-depend only on aggregate variation in step-level feature magnitudes and 
-are insensitive to the specific treatment of partial prefill
-chunks, which affects only localized mass attribution within phases.
-
-\paragraph{Separation of Concerns.}
-Workload generators and benchmarking frameworks are used solely to induce
-pressure variability during calibration. Estimation of step-level execution
-coefficients relies exclusively on trace-visible phase timing and token
-counts, preserving the trace-only and non-intrusive nature of the method.
-
-% ============================================================
-\subsection{Justification and Scope}
-\label{sec:extended_justification}
-
-Robust loss functions address unavoidable noise and outliers in production
-traces without altering the underlying execution model.
-The fixed-point formulation clarifies how step-density reweighting reconciles
-time-based observations with step-based costs.
-Finally, explicit workload design ensures that the estimation problem is
-well-conditioned by construction, rather than relying on incidental workload
-variation.
-
-Together, these extensions strengthen the estimator’s practical reliability
-and interpretability while preserving its central property: step-level
-execution coefficients are inferred using only trace-visible information,
-without engine instrumentation or per-step timing.
-
-\begin{table}[t]
-\centering
-\caption{Summary of key symbols used in step-level coefficient estimation.}
-\label{tab:symbol_glossary}
-\begin{tabular}{lll}
-\toprule
-Symbol & Description & Units \\
-\midrule
-$\beta_0$ & Per-step fixed overhead & seconds / step \\
-$\beta_1$ & Prefill token cost & seconds / token \\
-$\beta_2$ & Decode token cost & seconds / token \\
-$T_i$ & Observed phase duration & seconds \\
-$N_i$ & Trace-inferred step count & steps \\
-$p^{\mathrm{pf}}(t)$ & Prefill token pressure & tokens / step \\
-$p^{\mathrm{dec}}(t)$ & Decode token pressure & tokens / step \\
-$C$ & Prefill chunk size & tokens \\
-$\rho_r$ & Tokens in final prefill chunk & tokens \\
-$\mu_r$ & Missing prefill chunk mass & tokens \\
-$\Delta(t;\beta)$ & Local step duration model & seconds / step \\
-$\lambda(t;\beta)$ & Step density & steps / second \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-
-\section{Evaluation}
-\label{sec:evaluation}
-
-\section{Implementation}
-\label{sec:implementation}
-
-\section{Limitations of our Approach}
-\label{sec:limitations}
-
-Our current approach has several important limitations:
-
-\begin{enumerate}
-    \item \textbf{Hardware and model specificity.}
-    BLIS is calibrated for a fixed combination of GPU type and model
-    architecture. We do not attempt to generalize across different hardware or
-    models. If either changes, BLIS must be retrained with new data.
-
-    \item \textbf{No pre-emption.}
-    We do not model pre-emption of running requests. In practice, triggering
-    pre-emption during request handling is rare and avoided by the scheduler
-    logic, but its absence in our model means we cannot accurately predict
-    latency under pre-emptive scenarios.
-
-    \item \textbf{No speculative decoding.}
-    We currently omit speculative decoding mechanisms (such as those recently
-    introduced in vLLM as an experimental feature).
-\end{enumerate}
-
-\section{Future Work}
-\label{sec:future-work}
-
-\section{Conclusion}
-\label{sec:conclusion}
-
-\nocite{*}
-\bibliographystyle{plain}
-\bibliography{blis}
-
-\appendix 
-
-\section{Theory-to-Code Mapping for Baseline Estimation}
-\label{sec:baseline_theory_to_code}
-
-We infer per-step execution costs by reconstructing how much prefill and decode
-work overlaps in time during each phase, correcting for prefill chunking,
-converting wall-clock exposure into step-level token exposure, and fitting a
-nonnegative linear regression using only trace-visible information.
-
-\paragraph{Key ideas and implementation mapping.}
-The baseline estimator follows six conceptual steps, each of which maps directly
-to a small, well-defined portion of the reference implementation.
-
-\begin{enumerate}
-  \item \textbf{Estimate step-level costs from phase-level traces.} \\
-  The goal is to estimate coefficients $(\beta_0,\beta_1,\beta_2)$ in the
-  step-time model
-  \[
-  \Delta t
-  =
-  \beta_0
-  +
-  \beta_1\,(\text{prefill tokens})
-  +
-  \beta_2\,(\text{decode tokens}),
-  \]
-  even though production traces expose only phase start/end times and token
-  counts, not step boundaries. Each trace phase contributes one regression
-  equation relating its observed duration to its inferred step-level workload. \\
-  \emph{Code mapping:} function \texttt{estimate\_betas\_baseline}, regression
-  construction in Section~7 of the implementation.
-
-  \item \textbf{Reconstruct system load via overlap-based token pressures.} \\
-  At any moment in time, each active prefill request contributes approximately
-  $C$ tokens per step, and each active decode request contributes approximately
-  one token per step. When phases overlap in time, their contributions add. This
-  yields time-varying token pressure signals for prefill and decode, expressed in
-  units of tokens per step. \\
-  \emph{Code mapping:} global time grid construction from phase boundaries, and
-  pressure arrays \texttt{p\_pf\_full} and \texttt{p\_dec}.
-
-  \item \textbf{Convert wall-clock integrals into step-level exposure.} \\
-  Because pressures are measured in tokens per step but traces are measured in
-  seconds, we introduce a phase-local step-density proxy
-  $\widehat{\lambda}_i = N_i / T_i$ (steps per second), where $N_i$ is the
-  trace-inferred step count and $T_i$ is the observed phase duration. Multiplying
-  time integrals of pressure by $\widehat{\lambda}_i$ converts them into total
-  token exposure. \\
-  \emph{Code mapping:} computation of \texttt{lambda\_hat} and use of
-  \texttt{integrate\_piecewise\_constant} to form $A_i^{\mathrm{pf}}$ and
-  $A_i^{\mathrm{dec}}$.
-
-  \item \textbf{Correct systematic bias from partial prefill chunks.} \\
-  Prefill executes in chunks of size $C$ tokens per step, except for the final
-  prefill step of a request, which may be smaller. Treating all prefill steps as
-  full chunks overcounts work. For each request, we compute the missing token
-  mass in the final chunk and subtract it from the integrated prefill exposure,
-  redistributing it uniformly over the request's prefill interval. \\
-  \emph{Code mapping:} computation of $\rho_r$ and $\mu_r$ for each prefill
-  request and integrated correction applied when forming $A_i^{\mathrm{pf}}$.
-
-  \item \textbf{Reduce each phase to a single linear regression row.} \\
-  After computing step count and integrated token exposures, each phase instance
-  yields one equation of the form
-  \[
-  T_i
-  =
-  \beta_0 N_i
-  +
-  \beta_1 A_i^{\mathrm{pf}}
-  +
-  \beta_2 A_i^{\mathrm{dec}},
-  \]
-  where all quantities on the right-hand side are derived from traces. Stacking
-  all phases produces a linear system. \\
-  \emph{Code mapping:} construction of the design matrix
-  \texttt{X = [N\_i, A\_pf\_i, A\_dec\_i]} and target vector \texttt{y = T\_i}.
-
-  \item \textbf{Solve a nonnegative least-squares problem to obtain simulator-ready coefficients.} \\
-  The coefficients are estimated by solving a nonnegative least-squares problem,
-  enforcing physical constraints that costs cannot be negative. The resulting
-  coefficients can be used directly in the simulator's step-time model without
-  further calibration. \\
-  \emph{Code mapping:} \texttt{LinearRegression(fit\_intercept=False,
-  positive=True)} and return of \texttt{BaselineBetaResult}.
-\end{enumerate}
-
-\paragraph{Summary.}
-The baseline estimator is deliberately simple: it uses only phase-level timing
-and token counts, reconstructs overlapping workload via deterministic rules,
-applies a minimal bias correction for prefill chunking, and fits a convex
-regression problem. This simplicity makes it robust, trace-only, and easy to
-audit, while providing step-level coefficients suitable for discrete-event
-simulation.
 
 \end{document}
