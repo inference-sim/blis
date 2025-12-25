@@ -196,22 +196,28 @@ on the number of output tokens $\ell_i^{\text{out}}$.
 \section{Trace-Only Estimation of Step-Level Execution Coefficients}
 \label{sec:step_beta_estimation}
 
-This section presents a trace-only methodology for estimating
+This section develops a trace-only methodology for estimating the
 \emph{step-level} execution coefficients of a vLLM-style inference engine.
-We proceed in three stages.
-First, we introduce a simple but principled baseline estimator that fits
-phase durations using time-integrated workload signals.
-Second, we refine this estimator using an iterative, step-density--reweighted
-procedure inspired by majorization--minimization (MM).
-Finally, we discuss robustness, workload design for calibration, and practical
-limitations.
+Our goal is to recover the coefficient vector
+$\beta=(\beta_0,\beta_1,\beta_2)$ in a step-time model that is used by the
+simulator, using only production traces that report phase start/end times and
+aggregate token counts.
+No step boundaries, per-step timings, or engine instrumentation are assumed.
 
-Throughout, we emphasize trace-only operation: no step boundaries, 
-per-step timings, or engine instrumentation are assumed.
+We present two estimators.
+Section~\ref{sec:baseline} introduces a simple, trace-only baseline that fits
+phase durations using time-integrated workload signals.
+Section~\ref{sec:em_estimation} then refines this baseline by making the
+\emph{latent placement of steps in wall-clock time} explicit and estimating it
+via an EM procedure with exact handling of the final partial prefill chunk.
+The baseline can be interpreted as a one-shot instance of the same latent-step
+allocation view, with a phase-local uniform allocation surrogate; EM replaces
+this surrogate by an iteration-dependent allocation driven by a learned
+step-density model.
 
 \paragraph{Notation and units (summary).}
-Table~\ref{tab:notation_summary} summarizes the principal symbols used in
-this section and their units.
+Table~\ref{tab:notation_summary} lists the principal symbols used in the baseline
+and EM estimators and their units.
 
 \begin{table}[ht!]
 \centering
@@ -221,66 +227,60 @@ this section and their units.
 \textbf{Symbol} & \textbf{Units} & \textbf{Meaning} \\
 \midrule
 $k$ & step index & busy-loop iteration (latent execution step) \\
-$r$ & request index & inference request; each has exactly one prefill phase and one decode phase \\
-$i$ & phase index & a specific phase (prefill or decode) of a specific request \\
-$m$ & iteration index & outer iteration of the step-density reweighted estimator \\[0.5ex]
+$r$ & request index & inference request; each has one prefill phase and one decode phase \\
+$i$ & phase index & a phase instance (prefill or decode) of a specific request \\
+$j$ & grid index & index of a trace-induced time-grid cell $[g_j,g_{j+1})$ \\
+$m$ & iteration index & EM iteration index \\[0.5ex]
 
-$t_{i,s},\,t_{i,e}$ & seconds & start and end times of phase $i$ \\
-$\ell_i$ & seconds & observed duration of phase $i$ \\
-$N_i$ & steps & trace-inferred step count for phase $i$ (held fixed during estimation) \\
-$\tau_i$ & categorical (unitless) & phase type of instance $i$ (\textsf{prefill} or \textsf{decode}) \\
-$T^{\mathrm{pf}}_k,\,T^{\mathrm{dec}}_k$ & tokens & prefill/decode token totals processed in step $k$ \\[0.5ex]
+$t_{i,s},\,t_{i,e}$ & seconds & start and end times of phase instance $i$ \\
+$\ell_i$ & seconds & observed duration of phase instance $i$ ($\ell_i=t_{i,e}-t_{i,s}$) \\
+$\tau_i$ & categorical & phase type of instance $i$ (\textsf{prefill} or \textsf{decode}) \\
+$N_i$ & steps & trace-inferred step count for phase instance $i$ (fixed) \\[0.5ex]
 
 $C$ & tokens/step & prefill chunk size \\
 $P_r$ & tokens & total (uncached) prefill tokens for request $r$ \\
 $D_r$ & tokens & total decode tokens for request $r$ \\
-$\rho_r$ & tokens & tokens processed in the final prefill step of request $r$, Eq.~\eqref{eq:rho_def} \\
-$\mu_r$ & tokens & missing token mass of final prefill chunk, $\mu_r=C-\rho_r$ \\[0.5ex]
+$\rho_r$ & tokens & tokens in the final prefill step of request $r$, Eq.~\eqref{eq:rho_def} \\
+$\mu_r$ & tokens & missing token mass in final prefill step ($\mu_r=C-\rho_r$) \\[0.5ex]
 
 $a_r(t)$ & unitless & indicator that request $r$ is in prefill at time $t$ (trace-visible) \\
-$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ & tokens/step & naive full-chunk prefill pressure, $C\sum_r a_r(t)$ \\
-$p^{\mathrm{dec}}(t)$ & tokens/step & decode pressure (tokens/step) from overlapping decode phases \\[0.5ex]
+$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ & tokens/step & naive full-chunk prefill pressure $C\sum_r a_r(t)$ \\
+$p^{\mathrm{dec}}(t)$ & tokens/step & decode pressure from overlapping decode phases \\[0.5ex]
 
-$\widehat{\lambda}_i$ & steps/sec & baseline phase-local step density proxy, $\widehat{\lambda}_i=N_i/\ell_i$ \\
-$c(t)$ & tokens/sec & baseline partial-chunk correction signal (uniform/end/none) \\[0.5ex]
+$\widehat\lambda_i$ & steps/sec & baseline phase-local step-density proxy $N_i/\ell_i$, Eq.~\eqref{eq:baseline_lambda_hat} \\
+$c(t)$ & tokens/sec & baseline partial-chunk correction signal (none/uniform/end) \\[0.5ex]
 
-$A_i^{\mathrm{pf}}$ & tokens & baseline prefill exposure, Eq.~\eqref{eq:baseline_integrated_exposures_pf} \\
-$A_i^{\mathrm{dec}}$ & tokens & baseline decode exposure, Eq.~\eqref{eq:baseline_integrated_exposures_dec} \\[0.5ex]
+$A_i^{\mathrm{pf}}$ & tokens & baseline prefill exposure (feature), Eq.~\eqref{eq:baseline_integrated_exposures_pf} \\
+$A_i^{\mathrm{dec}}$ & tokens & baseline decode exposure (feature), Eq.~\eqref{eq:baseline_integrated_exposures_dec} \\[0.5ex]
 
-$\Delta^{(m)}(t)$ & sec/step & iteration-$m$ local step-time model, Eq.~\eqref{eq:local_step_time_m} \\
-$\lambda^{(m)}(t)$ & steps/sec & iteration-$m$ step density, $\lambda^{(m)}(t)=1/\Delta^{(m)}(t)$, Eq.~\eqref{eq:step_density_m} \\[0.5ex]
+$g_1<\cdots<g_{J+1}$ & seconds & trace-induced grid boundaries; cells are $[g_j,g_{j+1})$ \\
+$\mathcal{J}(i)$ & set & grid cells fully contained in phase window of $i$ (EM) \\[0.5ex]
 
-$q_i^{(m)}(t)$ & 1/sec & iteration-$m$ phase time-density proportional to $\lambda^{(m)}$ over $[t_{i,s},t_{i,e})$ \\
-$q_r^{(m)}(t)$ & 1/sec & iteration-$m$ request time-density proportional to $\lambda^{(m)}$ over $[t_{r,s},t_{r,e})$ \\
-$\mathcal{W}_r^{(m)}$ & time subset & iteration-$m$ last-step window for request $r$, Eq.~\eqref{eq:last_step_window_m} \\[0.5ex]
-
-$c_r^{(m)}(t)$ & tokens/sec & iteration-$m$ request-level correction signal, Eq.~\eqref{eq:cr_beta_informed_m} \\
-$c^{(m)}(t)$ & tokens/sec & iteration-$m$ aggregate correction signal, $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$ \\
-$\tilde p^{\mathrm{pf},(m)}(t)$ & tokens/step & iteration-$m$ effective prefill pressure, Eq.~\eqref{eq:prefill_pressure_beta_informed_m} \\[0.5ex]
-
-$\bar p_i^{\mathrm{pf},(m)}$ & tokens/step & iteration-$m$ step-averaged prefill pressure, Eq.~\eqref{eq:step_averaged_pressures_m} \\
-$\bar p_i^{\mathrm{dec},(m)}$ & tokens/step & iteration-$m$ step-averaged decode pressure, Eq.~\eqref{eq:step_averaged_pressures_m} \\[0.5ex]
+$Z_{ij}$ & steps & latent number of steps of phase $i$ executed in grid cell $j$ (EM) \\
+$\pi^{(m)}_{ij}$ & unitless & EM allocation weight of phase $i$ to cell $j$ at iter.~$m$, Eq.~\eqref{eq:em_pi} \\
+$\Delta^{(m)}_j$ & sec/step & EM cell-level step-time proxy at iter.~$m$, Eq.~\eqref{eq:em_step_rate} \\
+$\lambda^{(m)}_j$ & steps/sec & EM cell-level step density $1/\Delta^{(m)}_j$, Eq.~\eqref{eq:em_step_rate} \\
+$\tilde p^{\mathrm{pf},(m)}_j$ & tokens/step & EM effective prefill pressure on cell $j$ at iter.~$m$ \\[0.5ex]
 
 $\beta_0$ & sec/step & fixed per-step overhead coefficient \\
 $\beta_1,\beta_2$ & sec/token & per-token execution costs (prefill / decode) \\
-$\beta^{(m)}$ & mixed & coefficient vector at outer iteration $m$ \\
+$\beta^{(m)}$ & mixed & coefficient vector at EM iteration $m$ \\
 \bottomrule
 \end{tabular}
-\caption{Notation and units used in trace-only step-level coefficient estimation.}
+\caption{Notation and units used in trace-only step-level coefficient estimation (baseline and EM).}
 \label{tab:notation_summary}
 \end{table}
-
 
 
 % ============================================================
 \subsection{Problem Setup and Step-Level Model}
 \label{sec:problem_setup}
 
-We consider a vLLM-style inference engine that advances execution through
-a single logical busy-loop.
-Each busy-loop iteration (a \emph{step}) executes one forward-pass cycle
-that may process prefill tokens, decode tokens, or both, for a set of
-concurrently active requests.
+We consider a vLLM-style inference engine that advances execution through a
+single logical busy-loop.
+Each busy-loop iteration (a \emph{step}) executes one forward-pass cycle that
+may process prefill tokens, decode tokens, or both, for a set of concurrently
+active requests.
 Steps are assumed to execute sequentially.
 
 Let $k$ index busy-loop steps.
@@ -295,193 +295,157 @@ We model the duration of step $k$ as
 \beta_2\,T^{\mathrm{dec}}_k,
 \label{eq:step_model}
 \end{equation}
-where:
-\begin{itemize}
-  \item $\beta_0 \ge 0$ is a fixed per-step overhead (seconds/step),
-  \item $\beta_1,\beta_2 \ge 0$ are per-token costs (seconds/token),
-  \item $T^{\mathrm{pf}}_k$ and $T^{\mathrm{dec}}_k$ are the total numbers of
-        prefill and decode tokens processed in step $k$ across all requests.
-\end{itemize}
+where $\beta_0\ge 0$ is a fixed per-step overhead (seconds/step),
+$\beta_1,\beta_2\ge 0$ are per-token costs (seconds/token), and
+$T^{\mathrm{pf}}_k$ and $T^{\mathrm{dec}}_k$ are the total numbers of prefill and
+decode tokens processed in step $k$ across all requests.
 
 This affine step-time model is the fundamental abstraction used by our
-simulator. Accurate simulation therefore requires identifying the
-coefficient vector $\beta=(\beta_0,\beta_1,\beta_2)$.
+simulator. Accurate simulation therefore requires identifying $\beta$ from
+trace-only data.
 
 \paragraph{What traces provide.}
 Production inference traces do not expose step boundaries or per-step execution
-timings. Instead, they provide a sequence of \emph{phase instances}, indexed by
-$i$, each corresponding to either the prefill phase or the decode phase of a
-single request.
-
+timings.
+Instead, they provide a collection of \emph{phase instances}, indexed by $i$,
+each corresponding to either the prefill phase or the decode phase of a single
+request.
 For each phase instance $i$, the trace provides:
-\begin{itemize}
-  \item the request id $r_i$
-  \item the phase type $\tau_i$ (\textit{prefill} or \textit{decode}),
-  \item a start time $t_{i,s}$ and end time $t_{i,e}$,
-  \item an observed phase duration $\ell_i = t_{i,e} - t_{i,s}$,
-  \item aggregate token counts associated with the phase, including the number
-        of \emph{prefill tokens} or \emph{decode tokens}.
-\end{itemize}
+(i) the request id $r_i$,
+(ii) the phase type $\tau_i\in\{\textsf{prefill},\textsf{decode}\}$,
+(iii) start and end times $(t_{i,s},t_{i,e})$ and duration
+$\ell_i=t_{i,e}-t_{i,s}$, and
+(iv) aggregate token counts for that request, including total prefill tokens
+$P_{r_i}$ and total decode tokens $D_{r_i}$.
+Since each phase instance uniquely identifies its request, we write $P_r$ and
+$D_r$ without ambiguity.
 
-For a phase instance $i$ associated with request $r_i$, we denote by $P_{r_i}$
-the total number of prefill tokens for that request and by $D_{r_i}$ the total
-number of decode tokens for its decode phase. Since each phase 
-instance uniquely identifies its request, we write $P_r$ 
-(prefill tokens of request $r$) and $D_r$ (decode tokens of request $r$) 
-without ambiguity. From this 
-information, we derive a step count $N_i \in \mathbb{N}$.
-For a decode phase, execution proceeds one token per step, and hence
-$N_i$ equals the number of decode tokens.
-For a prefill phase, execution is chunked: under a prefill chunk size $C$,
-a standard trace-inferred choice is
-$N_i = \lceil P_r / C \rceil$.\footnote{
+From these fields, we derive a trace-inferred step count $N_i\in\mathbb{N}$ for
+each phase instance.
+For a decode phase, execution proceeds one token per step, so $N_i=D_r$.
+For a prefill phase, execution is chunked: under prefill chunk size $C$, a
+standard trace-inferred choice is
+$N_i=\lceil P_r/C\rceil$.\footnote{
 Prefix-cached tokens do not contribute to execution steps and are therefore
 excluded from $P_r$. This treatment is consistent with the execution semantics
 of vLLM-style inference engines.
 }
+
+\paragraph{Latent step allocation viewpoint (common to baseline and EM).}
+The central obstacle in trace-only estimation is that, although each phase
+instance $i$ has a known total step count $N_i$, the trace does not reveal
+\emph{when within} $[t_{i,s},t_{i,e})$ those $N_i$ steps occurred, nor how the
+per-step token totals $(T^{\mathrm{pf}}_k,T^{\mathrm{dec}}_k)$ varied across
+time.
+Both the baseline and EM estimators operate by constructing
+\emph{trace-only attribution models} that allocate this latent step exposure
+over wall-clock time using only trace-visible phase boundaries.
+These attribution models are not claims about true step boundaries; they are
+used only through time integrals on a grid induced by the trace.
+
 
 % ============================================================
 \subsection{Trace-Derived Token Pressures}
 \label{sec:pressures}
 
 \paragraph{Intuition.}
-Inference executes as a sequence of discrete steps, but production traces expose
-only coarse, phase-level summaries.
-For each prefill or decode phase of a request, the trace records when the phase
-starts and ends and how many tokens are processed, but not how those tokens are
-distributed across individual steps.
-The goal is not to reconstruct the hidden step schedule, but to recover
-step-level execution coefficients that describe how different types of work
-contribute to elapsed time when execution is aggregated over many steps.
-
-The baseline estimator bridges this gap by compressing step-level behavior into
-phase-level quantities that are consistent with the trace.
-It treats each phase as a superposition of many unobserved steps and represents
-the effective step-level workload of each type using token pressures.
-These pressures describe, as a function of time, how much prefill and decode
-work is being processed per execution step across all concurrently active
-requests, without requiring access to step boundaries or per-step timings.
-This intuition is illustrated in Figure \ref{fig:overlap_phases}.
+Inference executes as a sequence of discrete steps, but traces provide only
+coarse phase-level summaries.
+The goal is not to reconstruct the hidden step schedule; rather, we seek
+step-level coefficients that explain how prefill and decode work contribute to
+elapsed time \emph{when aggregated over many steps}.
+We therefore represent step-level workload using \emph{token pressures}:
+trace-derived functions of wall-clock time that quantify, in units of
+tokens/step, how much prefill and decode work would be attributed to a
+representative busy-loop step executed at that time.
+These pressures depend only on phase overlap in wall-clock time and can be
+computed exactly from phase boundaries.
+Figure~\ref{fig:overlap_phases} illustrates the resulting overlap structure.
 
 \begin{figure}[ht!]
   \centering
   \includegraphics[width=\linewidth]{figs/overlap_phases.pdf}
   \caption{\textbf{Phase overlap and inferred workload over wall-clock time.}
-Each horizontal bar represents a trace-visible prefill or decode phase 
-of a request, while dashed vertical lines indicate wall-clock time 
-instants at which an execution step boundary may occur. 
-The dashed line at time $t = 8.0$ falls at the end of a step during 
-which all requests are concurrently active, so both prefill and decode 
-pressures are at their maximum for that step. Although traces 
-expose only phase start and end times—not step boundaries—the 
-degree of phase overlap determines how much work is executed per 
-step when time is aggregated. The baseline estimator leverages this 
-intuition by converting overlap in wall-clock time into integrated 
-token exposures that are consistent with the underlying step-level 
-execution model.}
+Each horizontal bar represents a trace-visible prefill or decode phase of a
+request, while dashed vertical lines indicate wall-clock instants at which a
+step boundary may occur. Although traces expose only phase start/end times—not
+step boundaries—the degree of phase overlap determines how much work is executed
+per step when time is aggregated. The estimators below convert overlap in
+wall-clock time into token exposures consistent with the step-level model.}
 \label{fig:overlap_phases}
 \end{figure}
 
-Given these pressures and the trace-inferred number of steps per phase, the
-baseline constructs simple phase-level summaries—used as regression
-features—that quantify how much prefill and decode work each phase “exposes” to
-the underlying step model.
-Each phase duration can then be written as a linear function of these summaries
-and the unknown step-level coefficients, turning coefficient recovery into an
-ordinary regression problem.
-Solving this regression produces a single, globally consistent set of execution
-coefficients from trace-only data and provides the starting point for the
-step-density–reweighted refinements introduced next.
-
-\paragraph{Trace-only attribution (important).}
-All densities introduced below (e.g., $q_i$ and $q_r$) are \emph{attribution models} that allocate
-\emph{latent step exposure} over wall-clock time using only trace-visible phase boundaries.
-They are not claims about true step boundaries or per-step timings; the estimator uses them only through
-time integrals on the trace-induced grid.
-
+\paragraph{Trace-induced time grid.}
+Let $\{[g_j,g_{j+1})\}_{j=1}^J$ denote the piecewise-constant time grid formed by
+the union of all trace phase boundaries.
+All pressures and correction signals introduced below are constant on each grid
+cell, and all estimation procedures use them only through integrals over phase
+windows.
 
 \paragraph{Terminology: instantaneous quantities and exposures.}
-We distinguish between \emph{instantaneous} quantities, which are defined as
-functions of wall-clock time $t$ on the trace-induced grid, and
-\emph{exposures}, which are obtained by integrating instantaneous quantities
-over a phase window and serve as regression features.
+We distinguish between \emph{instantaneous} quantities, defined as functions of
+wall-clock time $t$ on the trace-induced grid, and \emph{exposures}, which are
+obtained by integrating instantaneous quantities over a phase window and serve
+as regression features.
 Instantaneous \emph{pressures} quantify work performed per execution step
-(tokens/step). The \emph{step density} $\lambda^{(m)}(t)$ (steps/sec) quantifies
-how frequently busy-loop steps occur in wall-clock time under the iteration-$m$
-local step-time model (Section~\ref{sec:local_step_density}).
-Exposures are phase- or request-level scalars with units of tokens, obtained
-either by converting time-integrated pressures using a step density proxy
-(baseline) or by aggregating step-averaged pressures over a fixed step count
-(iterative estimator).
-Throughout, all quantities are defined and combined in a manner consistent
-with their physical units.
-
+(tokens/step).
+Exposures are phase-level scalars with units of tokens, obtained either by
+(i) converting time-integrated pressures using a step-density surrogate
+(baseline), or (ii) forming step-averaged pressures via a step-allocation model
+and aggregating over a fixed step count (EM).
 
 \paragraph{Instantaneous token pressures.}
-We define two trace-derived, piecewise-constant \emph{instantaneous pressures}
-(tokens/step) on the trace-induced time grid.
-The decode pressure $p^{\mathrm{dec}}(t)$ is the total decode-token work that would
-be attributed to a representative busy-loop step executed at wall-clock time $t$,
+We define two trace-derived, piecewise-constant pressures (tokens/step).
+The decode pressure $p^{\mathrm{dec}}(t)$ is the total decode-token work that
+would be attributed to a representative busy-loop step executed at time $t$,
 given the set of requests whose trace-visible decode phases overlap $t$.
-For prefill, we use the \emph{naive full-chunk} pressure
-\[
+For prefill, we start from the \emph{naive full-chunk} pressure
+\begin{equation}
 p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t),
-\]
-which treats each active prefill request as contributing $C$ tokens per step.
-Any accounting for the final partial prefill chunk is represented separately,
-either through a correction \emph{in exposure space} in the baseline
-(via $c(t)$), or through an \emph{iteration-indexed effective pressure}
-$\tilde p^{\mathrm{pf},(m)}(t)$ constructed during iteration $m$ from the
-\emph{previous} iterate $\beta^{(m-1)}$ via the induced step density
-(Section~\ref{sec:beta_informed_prefill_correction}).
+\label{eq:pf_full_pressure}
+\end{equation}
+where $a_r(t)\in\{0,1\}$ indicates whether request $r$ is in its prefill phase at
+time $t$.
+This full-chunk pressure treats each active prefill request as contributing $C$
+tokens per step.
+Accounting for the final partial prefill chunk is handled separately:
+the baseline introduces a correction in \emph{exposure space} via a
+time-based signal $c(t)$, whereas EM incorporates the correction directly in
+\emph{step space} by modifying an iteration-dependent effective prefill pressure
+on the trace grid.
+
 
 \subsubsection{Prefill Chunking and Partial-Chunk Correction Signals}
 \label{sec:prefill_correction}
 
 Decode contributes exactly one token per active request per step.
-Prefill, however, proceeds in chunks of size $C$ tokens per step, except for
-the final prefill step of a request, which may process fewer than $C$ tokens.
+Prefill, however, proceeds in chunks of size $C$ tokens per step, except for the
+final prefill step of a request, which may process fewer than $C$ tokens.
 Naively treating all prefill steps as full chunks introduces systematic bias.
 
 For a request $r$ with $P_r$ prefill tokens and $N_r$ prefill steps, the final
 prefill step processes
 \begin{equation}
 \rho_r = P_r - C\,(N_r-1),
-\qquad \rho_r \in (0,C].
+\qquad \rho_r \in (0,C],
 \label{eq:rho_def}
 \end{equation}
-The missing token mass relative to a full chunk is
+and the missing token mass relative to a full chunk is
 \[
 \mu_r = C - \rho_r \in [0,C).
 \]
 
-\paragraph{Naive full-chunk pressure.}
-Let $a_r(t)\in\{0,1\}$ indicate whether request $r$ is in prefill at time $t$,
-as determined from trace-visible phase boundaries.
-The naive full-chunk prefill pressure is
-\begin{equation}
-p^{\mathrm{pf}}_{\mathrm{full}}(t)
-=
-C \sum_r a_r(t).
-\end{equation}
-
 \paragraph{No partial-chunk correction (baseline ablation).}
-The simplest baseline ignores partial chunks entirely and uses
-$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ as the effective prefill pressure.
-Under this choice, the estimator treats every prefill step as a full chunk,
-and the missing mass $\mu_r$ is not explicitly accounted for.
-
-This option serves as a natural ablation: it is fully trace-only, requires no
-additional assumptions about where the final prefill step occurs in time, and
-provides a lower bound on estimator fidelity when chunking effects are mild.
+The simplest baseline ignores partial chunks and uses
+$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ as the effective prefill pressure. This
+serves as a natural ablation: it is fully trace-only and makes no assumptions
+about where the final prefill step occurs within a prefill interval.
 
 \paragraph{Uniform redistribution correction (implemented in integrated form).}
-A more refined baseline accounts for the missing mass $\mu_r$ by redistributing
-it uniformly over the prefill interval of request $r$, but it does so in a way
-that is dimensionally consistent with the baseline feature construction.
-
-Let $[t_{r,s}, t_{r,e})$ denote the trace-visible prefill interval of request $r$.
-Define a \emph{correction signal} (tokens/second)
+A more refined baseline accounts for $\mu_r$ by redistributing it uniformly over
+the prefill interval of request $r$.
+Let $[t_{r,s},t_{r,e})$ denote the trace-visible prefill interval of request $r$.
+Define a per-request correction signal (tokens/second)
 \begin{equation}
 c_r^{\mathrm{uni}}(t)
 =
@@ -491,22 +455,22 @@ c_r^{\mathrm{uni}}(t)
 \text{units: tokens/second},
 \label{eq:uniform_corr_signal}
 \end{equation}
-and let the aggregate correction signal be
+and the aggregate correction signal
 \begin{equation}
 c^{\mathrm{uni}}(t)=\sum_r c_r^{\mathrm{uni}}(t).
 \label{eq:uniform_corr_signal_sum}
 \end{equation}
-By construction, $\int_{t_{r,s}}^{t_{r,e}} c_r^{\mathrm{uni}}(t)\,dt=\mu_r$,
-so total missing token mass is preserved exactly when integrating over time.
+By construction,
+$\int_{t_{r,s}}^{t_{r,e}} c_r^{\mathrm{uni}}(t)\,dt=\mu_r$, so total missing mass
+is preserved exactly when integrating over time.
 
-\paragraph{End-localized partial-chunk correction (implemented on the trace grid).}
-Uniform redistribution implicitly assumes the final prefill step could occur
-anywhere within the prefill interval. An alternative trace-only assumption is
-that the final prefill step completes near the trace-visible end time $t_{r,e}$.
-
-Let $\{[g_j,g_{j+1})\}$ denote the trace-induced time grid formed by all phase
-boundaries, and let $j(r)$ be the index of the unique grid segment containing
-$t_{r,e}$ (under the half-open convention, with boundary clamping at the end).
+\paragraph{End-localized correction (implemented on the trace grid).}
+Uniform redistribution implicitly treats the final prefill step as equally
+likely to occur anywhere within the prefill interval.
+An alternative trace-only assumption is that the final prefill step completes
+near the trace-visible end time $t_{r,e}$.
+Let $j(r)$ be the index of the unique trace-grid cell containing $t_{r,e}$ under
+the half-open convention (with boundary clamping at the end).
 Define the per-request end-localized correction signal (tokens/second)
 \begin{equation}
 c_r^{\mathrm{end}}(t)
@@ -524,43 +488,37 @@ c^{\mathrm{end}}(t)=\sum_r c_r^{\mathrm{end}}(t).
 \end{equation}
 Again, $\int c_r^{\mathrm{end}}(t)\,dt=\mu_r$ by construction.
 
-\paragraph{Remark (why we use correction signals in the baseline).}
-In the baseline, instantaneous token pressures are represented in units of
-tokens/step and only enter the estimator through time integrals that are
-subsequently converted into token totals via the phase-local step-density proxy
-$\widehat\lambda_i$ (Eq.~\eqref{eq:baseline_lambda_hat}). The partial-chunk 
-correction is therefore represented as a \emph{time-based}
-correction signal $c(t)$ (tokens/sec) so that its time integral is 
-directly in tokens and can be subtracted in exposure space without introducing any
-step-boundary assumptions.
-
+\paragraph{Remark (why correction signals appear in the baseline).}
+In the baseline, pressures are represented in units of tokens/step and enter the
+estimator only through time integrals that are converted into token totals using
+a phase-local step-density proxy (Section~\ref{sec:baseline}).
+The partial-chunk adjustment is therefore represented as a \emph{time-based}
+signal $c(t)$ (tokens/sec): its time integral is already in tokens and can be
+subtracted in exposure space without introducing any step-boundary assumptions.
 
 \paragraph{Implementation note (no pointwise reconstruction required).}
-Although we define token pressures and correction weights as functions of
-wall-clock time, the baseline estimator never requires evaluating them
-instantaneously.
-All quantities enter the estimator only through time integrals over phase
-intervals, such as
-$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt$
-and
+Although we define pressures and corrections as functions of wall-clock time, the
+estimators require only integrals over phase windows such as
+$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt$ and
 $\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt$.
-These integrals can be computed exactly from trace-visible phase boundaries by
-sweeping over a piecewise-constant time grid and applying per-request correction
-masses whose placement within a grid interval does not affect correctness.
+These can be computed exactly by sweeping the trace-induced time grid.
 
 
-
+% ============================================================
 \subsection{Baseline: Time-Integrated NNLS Estimation}
 \label{sec:baseline}
 
-We first present a simple, trace-only baseline estimator that fits phase
-durations using time-integrated pressures.
-Because pressures are expressed in \emph{tokens per step}, a time integral
-$\int p(t)\,dt$ has units $(\text{tokens}/\text{step})\cdot \text{seconds}$.
-To form regression features with units of \emph{tokens}---so that
-$\beta_1,\beta_2$ retain the interpretation ``seconds per token''---we
-convert time integrals into approximate \emph{step integrals} using a
-phase-local constant step density.
+We now present a simple trace-only baseline estimator.
+It fits phase durations using time-integrated pressures and reduces coefficient
+recovery to a single non-negative least squares (NNLS) regression.
+
+\paragraph{Baseline as fixed step allocation.}
+The baseline adopts the latent step-allocation viewpoint in its simplest form:
+for each phase instance $i$, it assumes the $N_i$ latent steps are spread
+approximately uniformly over the wall-clock interval $[t_{i,s},t_{i,e})$.
+Equivalently, it assumes a phase-local constant step density and uses it only to
+convert time-integrated pressures (tokens/step $\times$ seconds) into token totals
+(tokens) that can serve as regression features.
 
 \begin{algorithm}[t]
 \caption{Baseline trace-only estimation}
@@ -568,63 +526,53 @@ phase-local constant step density.
 \begin{algorithmic}[1]
 \Require Phase traces $\{(r_i,\tau_i,t_{i,s},t_{i,e},P_{r_i},D_{r_i})\}$, chunk size $C$
 \Ensure Estimated execution coefficients $\hat\beta$
-
 \For{each phase instance $i$}
   \State infer step count $N_i$ from trace-visible tokens
   \Comment{definition of $N_i$; §\ref{sec:problem_setup}}
 \EndFor
-
 \State construct global time grid from all phase boundaries
-\Comment{trace-induced grid for piecewise-constant instantaneous pressures; §\ref{sec:pressures}}
-
+\Comment{trace-induced grid for piecewise-constant pressures; §\ref{sec:pressures}}
 \For{each time interval in the grid}
   \State measure concurrent prefill and decode activity
-  \Comment{overlap $\Rightarrow$ \emph{instantaneous} pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t),p^{\mathrm{dec}}(t)$ on the grid; §\ref{sec:pressures}}
+  \Comment{instantaneous pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t),p^{\mathrm{dec}}(t)$; §\ref{sec:pressures}}
 \EndFor
-
 \For{each prefill request $r$}
   \State apply trace-only partial-chunk correction (optional)
-  \Comment{missing mass $\mu_r$ and trace-only correction signal $c(t)$ (tokens/sec); §\ref{sec:prefill_correction}, Eq.~\eqref{eq:rho_def}, Eq.~\eqref{eq:uniform_corr_signal_sum}/Eq.~\eqref{eq:end_corr_signal_sum}}
+  \Comment{missing mass $\mu_r$ and correction signal $c(t)$; §\ref{sec:prefill_correction}}
 \EndFor
-
 \For{each phase instance $i$}
   \State compute phase-level prefill and decode exposures
-  \Comment{baseline exposures $A_i^{\mathrm{pf}},A_i^{\mathrm{dec}}$ from instantaneous pressures and phase-local step density; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_lambda_hat}, Eq.~\eqref{eq:baseline_integrated_exposures_pf}, Eq.~\eqref{eq:baseline_integrated_exposures_dec}}
+  \Comment{$A_i^{\mathrm{pf}},A_i^{\mathrm{dec}}$; Eq.~\eqref{eq:baseline_integrated_exposures_pf}--\eqref{eq:baseline_integrated_exposures_dec}}
 \EndFor
-
 \State fit execution coefficients via NNLS
-\Comment{baseline predictor and NNLS objective; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_predictor}, Eq.~\eqref{eq:baseline_nnls}}
-
+\Comment{predictor Eq.~\eqref{eq:baseline_predictor}, objective Eq.~\eqref{eq:baseline_nnls}}
 \State \Return $\hat\beta$
 \end{algorithmic}
 \end{algorithm}
 
-
-
 \paragraph{Phase-local step density.}
 For phase instance $i$, let $\ell_i=t_{i,e}-t_{i,s}$ be its observed duration and
 let $N_i\in\mathbb{N}$ be the trace-inferred step count.
-We define the (phase-local) \emph{step density proxy} (steps/sec)
+We define the baseline \emph{phase-local step-density proxy} (steps/sec)
 \begin{equation}
 \widehat\lambda_i \;=\; \frac{N_i}{\ell_i}.
 \label{eq:baseline_lambda_hat}
 \end{equation}
-
-This assumes steps are spread approximately uniformly over the phase window,
-and is used \emph{only} to convert time integrals into step-aggregated token
-totals in the baseline.\footnote{Implementation detail: to avoid extreme $\widehat{\lambda}_i$ when $\ell_i$
-is very small, we may compute $\widehat{\lambda}_i = N_i/\max\{\ell_i, \ell_{\min}\}$ for a
-small $\ell_{\min}\ge 0$. The default $\ell_{\min}=0$ recovers Eq.~\eqref{eq:baseline_lambda_hat}.} 
-We emphasize that $\widehat{\lambda}_i$ is a surrogate step-density used only
-to convert time-integrated pressures into step-aggregated token exposures.
-
+This proxy is used \emph{only} to convert time integrals into step-aggregated
+token exposures in the baseline.\footnote{Implementation detail: to avoid extreme
+$\widehat{\lambda}_i$ when $\ell_i$ is very small, we may compute
+$\widehat{\lambda}_i = N_i/\max\{\ell_i, \ell_{\min}\}$ for a small
+$\ell_{\min}\ge 0$. The default $\ell_{\min}=0$ recovers
+Eq.~\eqref{eq:baseline_lambda_hat}.}
 
 \paragraph{Phase-level exposures (baseline regression features).}
-Let $p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t)$ denote the naive full-chunk
-prefill pressure (tokens/step), and let $p^{\mathrm{dec}}(t)$ denote the decode
-pressure (tokens/step). Let $c(t)$ denote a chosen partial-chunk correction signal
-(tokens/second), e.g., $c^{\mathrm{uni}}(t)$ from Eq.~\eqref{eq:uniform_corr_signal_sum},
-$c^{\mathrm{end}}(t)$ from Eq.~\eqref{eq:end_corr_signal_sum}, or $c(t)\equiv 0$ (ablation).
+Let $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ denote the naive full-chunk prefill
+pressure and let $p^{\mathrm{dec}}(t)$ denote the decode pressure, both in units
+of tokens/step.
+Let $c(t)$ denote a chosen partial-chunk correction signal (tokens/second), e.g.,
+$c^{\mathrm{uni}}(t)$ from Eq.~\eqref{eq:uniform_corr_signal_sum},
+$c^{\mathrm{end}}(t)$ from Eq.~\eqref{eq:end_corr_signal_sum}, or $c(t)\equiv 0$
+(ablation).
 
 We define baseline phase-level exposures (tokens) as
 \begin{align}
@@ -644,9 +592,9 @@ A^{\mathrm{dec}}_i
 \end{align}
 The integrals of $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and $p^{\mathrm{dec}}(t)$ have
 units $(\text{tokens}/\text{step})\cdot \text{seconds}$, which are converted into
-tokens by $\widehat\lambda_i$ (steps/second), while $\int c(t)\,dt$ is already in tokens.
-Accordingly, the correction term is \emph{not} multiplied by $\widehat\lambda_i$.
-
+tokens by $\widehat\lambda_i$ (steps/second), while $\int c(t)\,dt$ is already in
+tokens. Accordingly, the correction term is \emph{not} multiplied by
+$\widehat\lambda_i$.
 
 \paragraph{Baseline predictor.}
 The baseline predicts phase duration as
@@ -661,8 +609,7 @@ The baseline predicts phase duration as
 \label{eq:baseline_predictor}
 \end{equation}
 where $\beta_0$ has units seconds/step and $\beta_1,\beta_2$ have units
-seconds/token, consistent with the step-level model in
-Eq.~\eqref{eq:step_model}.
+seconds/token, consistent with the step-level model in Eq.~\eqref{eq:step_model}.
 
 \paragraph{NNLS estimation.}
 Given a set of phase instances $\mathcal{I}$, we estimate $\beta$ via
@@ -676,11 +623,353 @@ non-negative least squares:
 \label{eq:baseline_nnls}
 \end{equation}
 
-We emphasize that the simulator generates its own step-level token counts 
-and KV-cache dynamics; the only information learned from traces is the 
-estimated $\beta$, which parameterizes the simulator but does not 
-encode any trace-specific timing information.
+\paragraph{Bridge to EM.}
+The baseline yields a single globally consistent coefficient estimate using only
+trace-derived overlap signals.
+Its simplifying assumption is the phase-local uniformity implicit in
+$\widehat\lambda_i$: the baseline does not attempt to infer how steps are
+distributed across the trace-induced grid within a phase, nor can it localize
+the final partial prefill chunk in step space.
+Section~\ref{sec:em_estimation} removes these limitations by introducing explicit
+latent step-allocation variables over the trace grid, using a coefficient-driven
+step-density model to compute expected allocations, and incorporating the final
+partial prefill chunk exactly at the trace-visible prefill end boundary.
+As in the baseline, all computations remain trace-only; the additional structure
+is used only to reallocate step exposure within trace-visible phase windows.
 
+% ============================================================
+\subsection{EM-Based Trace-Only Estimation with Exact Partial-Chunk Handling}
+\label{sec:em_estimation}
+
+We now present a trace-only Expectation--Maximization (EM) formulation of
+step-level coefficient estimation.
+This formulation leverages a structural property of vLLM-style inference engines:
+\emph{all request phase boundaries coincide with global busy-loop step boundaries}.
+As a result, each phase consists of an integer number of whole execution steps,
+and the final prefill step of a request is known to terminate exactly at the
+trace-visible prefill end time.
+
+The EM view provides a clean probabilistic interpretation, simplifies
+implementation relative to iterative reweighting schemes, and yields standard
+monotonic-improvement guarantees. It is illustrated in Algorithm~\ref{alg:em_simple}.
+
+\begin{algorithm}[t]
+\caption{EM trace-only estimation (simplified)}
+\label{alg:em_simple}
+\begin{algorithmic}[1]
+\Require Phase traces, chunk size $C$
+\Ensure Estimated execution coefficients $\hat\beta$
+
+\State infer step counts $N_i$ and construct trace-induced time grid
+\Comment{trace preprocessing; §\ref{sec:problem_setup}, §\ref{sec:pressures}}
+
+\State compute trace-derived pressures $p^{\mathrm{pf}}_{\mathrm{full},j},\,p^{\mathrm{dec}}_j$
+\Comment{overlap-based pressures; §\ref{sec:pressures}}
+
+\State initialize coefficients $\beta^{(0)}$ using baseline NNLS with no correction
+\Comment{initializer; §\ref{sec:baseline}}
+
+\For{$m=1,2,\dots$ until convergence}
+
+  \State estimate local step density from $\beta^{(m-1)}$
+  \Comment{cell-level step-rate model; Eq.~\eqref{eq:em_step_rate}}
+
+  \State allocate expected steps of each phase over the grid
+  \Comment{latent step allocation; Eq.~\eqref{eq:em_pi}}
+
+  \State localize the final prefill step and apply exact partial-chunk correction
+  \Comment{step-space correction; §\ref{sec:em_estimation}}
+
+  \State refit coefficients by NNLS using expected step-averaged pressures
+  \Comment{M-step regression; Eq.~\eqref{eq:em_mstep}}
+
+\EndFor
+
+\State \Return $\hat\beta \gets \beta^{(m)}$
+\end{algorithmic}
+\end{algorithm}
+
+
+We begin by defining the trace-induced grid and latent step-allocation variables,
+then describe initialization and EM iteration.
+
+
+% ------------------------------------------------------------
+\subsubsection{Trace Grid and Latent Step Allocation}
+
+Let $\{[g_j,g_{j+1})\}_{j=1}^J$ denote the trace-induced time grid formed by the
+union of all phase boundaries.
+Under the alignment assumption above, each grid boundary coincides with a global
+step boundary, and each grid cell contains an integer number of whole execution
+steps.
+
+For each phase instance $i$ with window $[t_{i,s},t_{i,e})$ and trace-inferred
+step count $N_i$, define
+\[
+\mathcal{J}(i)
+=
+\bigl\{ j : [g_j,g_{j+1}) \subseteq [t_{i,s},t_{i,e}) \bigr\}.
+\]
+
+We introduce latent step-allocation variables
+\[
+Z_{ij} \in \{0,1,2,\dots\},
+\qquad
+\sum_{j\in\mathcal{J}(i)} Z_{ij} = N_i,
+\]
+where $Z_{ij}$ denotes the (unobserved) number of busy-loop steps of phase $i$
+executed within grid cell $j$.
+
+These variables represent uncertainty about how steps are distributed across
+time intervals, even though their total count is known from the trace.
+
+% ------------------------------------------------------------
+\subsubsection{Exact Localization of the Final Prefill Step}
+
+For a request $r$ in its prefill phase, execution proceeds for $N_r$ steps,
+of which exactly one—the final step—processes a partial chunk.
+Let $\mu_r = C-\rho_r$ denote the missing token mass of that final step.
+
+Because prefill completion occurs at a trace-visible phase boundary, the final
+prefill step of request $r$ is known to lie in the unique grid cell
+\[
+j^\star(r)
+\quad\text{such that}\quad
+g_{j^\star(r)+1} = t_{r,e}.
+\]
+
+We therefore treat the final prefill step as deterministically localized within
+cell $j^\star(r)$.
+No probabilistic modeling is required for its position.
+
+To enforce this constraint, we decompose the latent allocation for the prefill
+phase of request $r$ as follows:
+\[
+Z_{rj^\star(r)} = 1 + Z'_{rj^\star(r)}, \qquad
+\sum_{j\in\mathcal{J}(r)} Z'_{rj} = N_r - 1,
+\]
+where the remaining $N_r-1$ steps are allocated across grid cells according to
+the EM step-allocation model described below.
+
+% ------------------------------------------------------------
+\subsubsection{Step-Rate Model}
+
+At EM iteration $m$, the current coefficient vector $\beta^{(m-1)}$ defines a
+cell-level step-time proxy.
+Let $p^{\mathrm{dec}}_j$ and $p^{\mathrm{pf}}_{\mathrm{full},j}$ denote the raw
+decode and full-chunk prefill pressures on grid cell $j$.
+Define
+\begin{equation}
+\Delta^{(m)}_j
+=
+\beta^{(m-1)}_0
++
+\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}_j
++
+\beta^{(m-1)}_2\,p^{\mathrm{dec}}_j,
+\qquad
+\lambda^{(m)}_j = \frac{1}{\Delta^{(m)}_j},
+\label{eq:em_step_rate}
+\end{equation}
+where $\tilde p^{\mathrm{pf},(m-1)}_j$ is the effective prefill pressure carried
+over from the previous iteration.
+The quantity $\lambda^{(m)}_j$ serves as a trace-only proxy for the local step
+density (steps per second) on grid cell $j$.
+
+\paragraph{Decode pressure and iteration dependence.}
+We emphasize that decode pressure $p^{\mathrm{dec}}_j$ is fully trace-derived and
+does not depend on the iteration index.
+Iteration dependence in decode-related quantities arises only through the
+step-allocation weights induced by the current step-density model
+$\lambda^{(m)}$, not through any modification of the decode pressure itself.
+
+% ------------------------------------------------------------
+\subsubsection{Initialization and First EM Iteration}
+\label{sec:em_initialization}
+
+The EM algorithm is initialized using the baseline trace-only estimator
+(Section~\ref{sec:baseline}), which provides a consistent starting point for the
+step-level execution coefficients without requiring step-aware modeling.
+
+\paragraph{Baseline initialization.}
+Let $\beta^{(0)}=(\beta^{(0)}_0,\beta^{(0)}_1,\beta^{(0)}_2)$ denote the coefficient
+vector obtained from the baseline NNLS fit.
+At initialization, we define the effective prefill pressure on each trace-grid
+cell to be the naive full-chunk pressure:
+\begin{equation}
+\tilde p^{\mathrm{pf},(0)}_j
+\;:=\;
+p^{\mathrm{pf}}_{\mathrm{full},j}.
+\label{eq:em_init_prefill_pressure}
+\end{equation}
+The trace-derived decode pressure $p^{\mathrm{dec}}_j$ is retained unchanged.
+
+No partial-chunk correction is applied at initialization.
+This ensures that the baseline estimator is used \emph{only} to initialize the
+coefficient vector and does not introduce step-level assumptions.
+
+\paragraph{Step-density model for the first iteration.}
+Using $\beta^{(0)}$ and the initialized pressures, the cell-level step-time model
+for the first EM iteration is
+\begin{equation}
+\Delta^{(1)}_j
+=
+\beta^{(0)}_0
++
+\beta^{(0)}_1\,p^{\mathrm{pf}}_{\mathrm{full},j}
++
+\beta^{(0)}_2\,p^{\mathrm{dec}}_j,
+\qquad
+\lambda^{(1)}_j = \frac{1}{\Delta^{(1)}_j}.
+\label{eq:em_first_step_density}
+\end{equation}
+
+\paragraph{Role of the first iteration.}
+The first EM iteration is the point at which step-aware modeling is introduced.
+Using $\lambda^{(1)}_j$, expected step allocations are computed, and partial-chunk
+effects are incorporated explicitly for the first time, producing updated
+effective pressures $\tilde p^{\mathrm{pf},(1)}_j$ and coefficients
+$\beta^{(1)}$.
+
+% ------------------------------------------------------------
+\subsubsection{E-Step: Expected Step Allocation}
+
+Conditioned on $N_i$ and $\beta^{(m-1)}$, we assume that the $N_i$ steps of phase
+$i$ are allocated across grid cells proportionally to step density:
+\begin{equation}
+(Z'_{ij})_{j\in\mathcal{J}(i)}
+\;\big|\;
+\beta^{(m-1)}
+\sim
+\mathrm{Multinomial}\!\left(
+N_i - \mathbf{1}\{\tau_i=\textsf{prefill}\};
+(\pi^{(m)}_{ij})_{j\in\mathcal{J}(i)}
+\right),
+\label{eq:em_multinomial}
+\end{equation}
+where
+\begin{equation}
+\pi^{(m)}_{ij}
+=
+\frac{\lambda^{(m)}_j}
+{\sum_{u\in\mathcal{J}(i)} \lambda^{(m)}_u}.
+\label{eq:em_pi}
+\end{equation}
+
+The expected step counts are therefore
+\[
+\mathbb{E}[Z_{ij}]
+=
+\begin{cases}
+1 + (N_i-1)\pi^{(m)}_{ij}, & \text{if $i$ is prefill and $j=j^\star(r_i)$}, \\
+(N_i-1)\pi^{(m)}_{ij}, & \text{if $i$ is prefill and $j\neq j^\star(r_i)$}, \\
+N_i\,\pi^{(m)}_{ij}, & \text{if $i$ is decode}.
+\end{cases}
+\]
+
+\paragraph{Expected step-averaged pressures.}
+Since pressures are constant within each grid cell, the expected step-averaged
+pressures for phase $i$ are
+\begin{align}
+\bar p^{\mathrm{dec},(m)}_i
+&=
+\sum_{j\in\mathcal{J}(i)} \pi^{(m)}_{ij}\, p^{\mathrm{dec}}_j,
+\\
+\bar p^{\mathrm{pf},(m)}_i
+&=
+\sum_{j\in\mathcal{J}(i)} \pi^{(m)}_{ij}\, \tilde p^{\mathrm{pf},(m)}_j.
+\end{align}
+
+% ------------------------------------------------------------
+\subsubsection{Partial-Chunk Correction}
+
+The missing token mass $\mu_r$ is subtracted exactly once in the final prefill
+cell $j^\star(r)$.
+Specifically, the effective prefill pressure is updated as
+\begin{equation}
+\tilde p^{\mathrm{pf},(m)}_{j^\star(r)}
+=
+p^{\mathrm{pf}}_{\mathrm{full},j^\star(r)}
+-
+\frac{\mu_r}{\mathbb{E}[Z_{rj^\star(r)}]},
+\label{eq:em_partial_chunk}
+\end{equation}
+while $\tilde p^{\mathrm{pf},(m)}_j = p^{\mathrm{pf}}_{\mathrm{full},j}$ for all
+other cells.
+This adjustment preserves units (tokens/step) and ensures that exactly one
+partial chunk per request is accounted for in expectation.
+
+% ------------------------------------------------------------
+\subsubsection{M-Step: Coefficient Update}
+
+With the expected step-averaged pressures fixed, we update $\beta$ by solving
+\begin{equation}
+\beta^{(m)}
+=
+\arg\min_{\beta\ge 0}
+\sum_{i\in\mathcal{I}}
+\left(
+N_i\beta_0
++
+[N_i\bar p^{\mathrm{pf},(m)}_i]\beta_1
++
+[N_i\bar p^{\mathrm{dec},(m)}_i]\beta_2
+-
+\ell_i
+\right)^2.
+\label{eq:em_mstep}
+\end{equation}
+
+Iterations continue until convergence.
+
+\paragraph{Summary.}
+The EM algorithm alternates between (i) estimating how execution steps are
+distributed across time using a step-density proxy, while exactly localizing the
+final partial prefill step, and (ii) refitting step-level execution coefficients.
+All computations are trace-only and require no reconstruction of individual step
+boundaries.
+
+% ============================================================
+\subsection{Theoretical Properties}
+\label{sec:em_theory}
+
+\begin{theorem}[Monotonic Improvement and Convergence]
+\label{thm:em_convergence}
+Let $\{\beta^{(m)}\}_{m\ge 0}$ be the sequence produced by the EM algorithm in
+Section~\ref{sec:em_estimation}.
+Then the observed-data squared-error objective
+\[
+\mathcal{L}(\beta)
+=
+\sum_{i\in\mathcal{I}}
+\left(
+\widehat\ell_i(\beta) - \ell_i
+\right)^2
+\]
+is non-increasing across iterations.
+Moreover, every accumulation point of $\{\beta^{(m)}\}$ is a stationary point of
+the constrained least-squares problem.
+\end{theorem}
+
+\begin{proof}
+The EM algorithm constructs, at each iteration $m$, a surrogate objective given by
+the conditional expectation of the complete-data squared-error loss with respect
+to the posterior distribution of the latent step-allocation variables
+$\{Z_{ij}\}$ under $\beta^{(m-1)}$.
+
+In the E-step, these expectations are computed exactly, incorporating the known
+localization of the final prefill step.
+In the M-step, the surrogate objective is minimized over $\beta\ge 0$, yielding a
+convex non-negative least squares problem.
+
+By standard EM convergence theory, each iteration does not increase the
+observed-data objective, and any accumulation point of the iterates is a
+stationary point of the constrained problem.
+See \cite{dempster1977em,wu1983convergence} for general results.
+\end{proof}
+
+\appendix
+\section{Deterministic Step-Density Reweighting (MM View)}
 \paragraph{Why reweighting helps.}
 This estimator remains wall-clock--weighted because the baseline exposures 
 $A_i^{\mathrm{pf}}$ and $A_i^{\mathrm{dec}}$ are formed
@@ -977,219 +1266,10 @@ path to step-level calibration using only production traces.
 The estimated coefficients $\beta^\star$ are used directly in the step-time
 model (Eq.~\eqref{eq:step_model}) of the discrete-event simulator.
 
-% ============================================================
-\subsection{EM-Based Trace-Only Estimation with Partial-Chunk Correction}
-\label{sec:em_estimation}
+\label{app:mm}
 
-We now present an alternative formulation of the step-density--reweighted estimator
-as a principled Expectation--Maximization (EM) algorithm.
-This view simplifies the implementation, provides a clear probabilistic
-interpretation, and yields standard monotonic-improvement guarantees.
 
-The key idea is to treat the \emph{allocation of execution steps over wall-clock
-time} as latent, while directly accounting for the fact that the final prefill
-step of each request may process a partial chunk.
-
-% ------------------------------------------------------------
-\subsubsection{Latent Variables on the Trace Grid}
-
-Let $\{[g_j,g_{j+1})\}_{j=1}^J$ denote the trace-induced time grid formed by all
-phase boundaries.
-Instantaneous prefill and decode pressures are piecewise-constant on this grid.
-
-For each phase instance $i$ with trace-visible window $[t_{i,s},t_{i,e})$ and
-trace-inferred step count $N_i$, define
-\[
-\mathcal{J}(i)
-=
-\bigl\{j : [g_j,g_{j+1}) \cap [t_{i,s},t_{i,e}) \neq \emptyset\bigr\}.
-\]
-
-We introduce the following latent variables.
-
-\paragraph{Latent step allocation.}
-For each phase $i$ and grid cell $j\in\mathcal{J}(i)$, let
-\[
-Z_{ij} \in \{0,1,2,\dots\}
-\quad\text{with}\quad
-\sum_{j\in\mathcal{J}(i)} Z_{ij} = N_i,
-\]
-where $Z_{ij}$ represents the (unobserved) number of busy-loop steps of phase $i$
-that occur while wall-clock time lies in grid interval $j$.
-
-\paragraph{Latent location of the final prefill step.}
-For each request $r$ in its prefill phase, recall that exactly one of the $N_r$
-prefill steps is partial, with missing token mass $\mu_r=C-\rho_r$.
-We introduce a categorical latent variable
-\[
-L_r \in \mathcal{J}(r),
-\]
-which denotes the grid cell containing the \emph{final prefill step} of request $r$.
-
-These latent variables allow us to model both step allocation and partial-chunk
-correction in a unified, trace-only framework.
-
-% ------------------------------------------------------------
-\subsubsection{Step-Rate Model (Complete-Data Likelihood)}
-
-At EM iteration $m$, we treat the coefficient vector $\beta^{(m-1)}$ as fixed and
-define a step-time proxy on each grid cell $j$:
-\begin{equation}
-\Delta^{(m)}_j
-=
-\beta^{(m-1)}_0
-+
-\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}_j
-+
-\beta^{(m-1)}_2\,p^{\mathrm{dec}}_j,
-\qquad
-\lambda^{(m)}_j=\frac{1}{\Delta^{(m)}_j}.
-\label{eq:em_step_rate}
-\end{equation}
-Here $p^{\mathrm{dec}}_j$ and $\tilde p^{\mathrm{pf},(m-1)}_j$ denote the decode and
-effective prefill pressures on grid cell $j$, respectively.
-
-Conditioned on $N_i$, we assume that steps of phase $i$ are allocated across grid
-cells proportionally to step density times cell duration:
-\begin{equation}
-(Z_{ij})_{j\in\mathcal{J}(i)}
-\;\big|\;
-N_i,\beta^{(m-1)}
-\sim
-\mathrm{Multinomial}\!\left(
-N_i;
-(\pi^{(m)}_{ij})_{j\in\mathcal{J}(i)}
-\right),
-\label{eq:em_multinomial}
-\end{equation}
-where
-\begin{equation}
-\pi^{(m)}_{ij}
-=
-\frac{\lambda^{(m)}_j\,|[g_j,g_{j+1}) \cap [t_{i,s},t_{i,e})|}
-{\sum_{u\in\mathcal{J}(i)} \lambda^{(m)}_u\,|[g_u,g_{u+1}) \cap [t_{i,s},t_{i,e})|}.
-\label{eq:em_pi}
-\end{equation}
-
-Similarly, for each prefill request $r$, the latent last-step location $L_r$ is
-modeled as
-\begin{equation}
-\Pr(L_r=j \mid \beta^{(m-1)})
-=
-\frac{\lambda^{(m)}_j\,|[g_j,g_{j+1}) \cap [t_{r,s},t_{r,e})|}
-{\sum_{u\in\mathcal{J}(r)} \lambda^{(m)}_u\,|[g_u,g_{u+1}) \cap [t_{r,s},t_{r,e})|}.
-\label{eq:em_last_step}
-\end{equation}
-
-This distribution expresses trace-only uncertainty about where the final prefill
-step occurs, weighted by the induced step density.
-
-% ------------------------------------------------------------
-\subsubsection{E-Step: Expected Step-Weighted Exposures}
-
-Because pressures are constant on each grid cell, the expected step-averaged
-pressures for phase $i$ are
-\begin{align}
-\bar p^{\mathrm{dec},(m)}_i
-&=
-\sum_{j\in\mathcal{J}(i)} \pi^{(m)}_{ij}\, p^{\mathrm{dec}}_j,
-\label{eq:em_dec_exposure}
-\\
-\bar p^{\mathrm{pf},(m)}_i
-&=
-\sum_{j\in\mathcal{J}(i)} \pi^{(m)}_{ij}\, \tilde p^{\mathrm{pf},(m)}_j.
-\label{eq:em_pf_exposure}
-\end{align}
-
-\paragraph{Expected partial-chunk correction.}
-Using Eq.~\eqref{eq:em_last_step}, the expected correction mass assigned to grid
-cell $j$ is
-\[
-\mathbb{E}[c^{(m)}_j]
-=
-\sum_r
-\mu_r\,
-\Pr(L_r=j \mid \beta^{(m-1)})
-\Big/
-(g_{j+1}-g_j),
-\]
-with units tokens/second.
-The effective prefill pressure is then updated as
-\begin{equation}
-\tilde p^{\mathrm{pf},(m)}_j
-=
-p^{\mathrm{pf}}_{\mathrm{full},j}
--
-\frac{\mathbb{E}[c^{(m)}_j]}{\lambda^{(m)}_j},
-\label{eq:em_pf_effective}
-\end{equation}
-which preserves units of tokens/step and ensures that exactly one partial chunk
-per request is accounted for in expectation.
-
-% ------------------------------------------------------------
-\subsubsection{M-Step: Coefficient Update}
-
-With $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ fixed, we update
-$\beta$ by solving the convex NNLS problem
-\begin{equation}
-\beta^{(m)}
-=
-\arg\min_{\beta\ge 0}
-\sum_{i\in\mathcal{I}}
-\left(
-N_i\beta_0
-+
-[N_i\bar p^{\mathrm{pf},(m)}_i]\beta_1
-+
-[N_i\bar p^{\mathrm{dec},(m)}_i]\beta_2
--
-\ell_i
-\right)^2.
-\label{eq:em_mstep}
-\end{equation}
-
-Iterations proceed until convergence of $\beta$.
-
-% ------------------------------------------------------------
-\subsubsection{Interpretation}
-
-The EM algorithm alternates between:
-(i) computing the expected step-level workload and expected location of the final
-prefill step under the current step-rate model (E-step), and
-(ii) refitting the execution coefficients to best explain observed phase
-durations given these expectations (M-step).
-
-All computations are trace-only and require no reconstruction of actual step
-boundaries.
-
-\begin{theorem}[Monotonic Improvement of the EM Estimator]
-\label{thm:em_monotonic}
-Let $\{\beta^{(m)}\}_{m\ge 0}$ be the sequence generated by the EM algorithm in
-Section~\ref{sec:em_estimation}.
-Then the observed-data objective
-\[
-\sum_{i\in\mathcal{I}} (\widehat\ell_i(\beta)-\ell_i)^2
-\]
-is non-increasing across iterations.
-Moreover, every limit point of $\{\beta^{(m)}\}$ is a stationary point of the
-corresponding constrained least-squares problem.
-\end{theorem}
-
-\begin{proof}
-The EM algorithm constructs, at iteration $m$, a surrogate objective given by the
-conditional expectation of the complete-data squared-error loss with respect to
-the posterior distribution of latent variables
-$\{Z_{ij},L_r\}$ under $\beta^{(m-1)}$.
-
-The E-step computes the expected sufficient statistics
-(step-weighted prefill and decode exposures) exactly.
-The M-step then minimizes this surrogate objective over $\beta\ge 0$, which is a
-convex non-negative least squares problem.
-
-By standard EM theory, each iteration does not increase the observed-data
-objective, and any accumulation point of the iterates is a stationary point.
-See, e.g., \cite{dempster1977em,wu1983convergence} for general EM convergence
-results.
-\end{proof}
+\bibliographystyle{plain}
+\bibliography{blis}
 
 \end{document}
