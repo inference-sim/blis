@@ -582,326 +582,149 @@ $\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt$ and
 $\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt$.
 These can be computed exactly by sweeping the trace-induced time grid.
 
+\section{Unified Allocation--Refit Estimation}
+\label{sec:allocation-refit}
 
-% ============================================================
-\subsection{Baseline: Time-Integrated NNLS Estimation}
-\label{sec:baseline}
+This section introduces a unified estimation framework for calibrating
+request-level latency and throughput models from partial, overlapping
+observations of inference execution.
+While the literature admits many estimation procedures under such
+incomplete observability, we show that the seemingly disparate estimators
+used in practice can all be viewed as instances of a single
+\emph{allocation--refit} principle.
 
-We now present a simple trace-only baseline estimator.
-It fits phase durations using time-integrated pressures and reduces coefficient
-recovery to a single non-negative least squares (NNLS) regression.
+At a high level, inference traces provide aggregate measurements over
+unknown, dynamically interleaved execution intervals (e.g., prefill and
+decode phases across concurrent requests).
+The core challenge is therefore not parameter fitting per se, but
+\emph{allocating observed aggregate execution time to latent execution
+quanta} before fitting parametric models.
 
-\paragraph{Baseline as fixed step allocation.}
-The baseline adopts the latent step-allocation viewpoint in its simplest form:
-for each phase instance $i$, it assumes the $N_i$ latent steps are spread
-approximately uniformly over the wall-clock interval $[t_{i,s},t_{i,e})$.
-Equivalently, it assumes a phase-local constant step density and uses it only to
-convert time-integrated pressures (tokens/step $\times$ seconds) into token totals
-(tokens) that can serve as regression features.
+We formalize this intuition as a two-stage iterative procedure:
+\begin{enumerate}
+    \item \textbf{Allocation:} infer the fractional contribution of each
+    latent execution unit (e.g., per-step or per-token work) to observed
+    aggregate measurements;
+    \item \textbf{Refit:} update parametric coefficients given the inferred
+    allocation.
+\end{enumerate}
 
-\begin{algorithm}[t]
-\caption{Baseline trace-only estimation}
-\label{alg:baseline_intuition}
-\begin{algorithmic}[1]
-\Require Phase traces $\{(r_i,\tau_i,t_{i,s},t_{i,e},P_{r_i},D_{r_i})\}$, chunk size $C$
-\Ensure Estimated execution coefficients $\hat\beta$
-\For{each phase instance $i$}
-  \State infer step count $N_i$ from trace-visible tokens
-  \Comment{definition of $N_i$; §\ref{sec:problem_setup}}
-\EndFor
-\State construct global time grid from all phase boundaries
-\Comment{trace-induced grid for piecewise-constant pressures; §\ref{sec:pressures}}
-\For{each time interval in the grid}
-  \State measure concurrent prefill and decode activity
-  \Comment{instantaneous pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t),p^{\mathrm{dec}}(t)$; §\ref{sec:pressures}}
-\EndFor
-\For{each prefill request $r$}
-  \State apply trace-only partial-chunk correction (optional)
-  \Comment{missing mass $\mu_r$ and correction signal $c(t)$; §\ref{sec:prefill_correction}}
-\EndFor
-\For{each phase instance $i$}
-  \State compute phase-level prefill and decode exposures
-  \Comment{$A_i^{\mathrm{pf}},A_i^{\mathrm{dec}}$; Eq.~\eqref{eq:baseline_integrated_exposures_pf}--\eqref{eq:baseline_integrated_exposures_dec}}
-\EndFor
-\State fit execution coefficients via NNLS
-\Comment{predictor Eq.~\eqref{eq:baseline_predictor}, objective Eq.~\eqref{eq:baseline_nnls}}
-\State \Return $\hat\beta$
-\end{algorithmic}
-\end{algorithm}
+This allocation--refit structure induces a natural
+\emph{generalized expectation--maximization (GEM)} interpretation:
+the allocation step corresponds to computing soft responsibilities over
+latent execution structure, while the refit step updates model parameters
+given these responsibilities.
+Different estimators arise solely from different choices of
+allocation kernels, refit solvers, and robustness constraints.
 
-\paragraph{Phase-local step density.}
-For phase instance $i$, let $\ell_i=t_{i,e}-t_{i,s}$ be its observed duration and
-let $N_i\in\mathbb{N}$ be the trace-inferred step count.
-We define the baseline \emph{phase-local step-density proxy} (steps/sec)
+Importantly, this perspective reveals that many estimators commonly
+treated as distinct---including non-negative least squares baselines,
+step-density reweighting methods, kernelized EM variants, and robust
+iteratively reweighted solvers---are not competing algorithms, but
+\emph{approximations or specializations of the same underlying GEM
+procedure}.
+
+In the remainder of this section, we proceed as follows.
+We first introduce a simple baseline estimator that serves as a
+principled initialization and sanity check (\S\ref{subsec:baseline}).
+We then formalize the allocation--refit principle and its GEM
+interpretation (\S\ref{subsec:gem}).
+Finally, we present a continuous kernelized allocation--refit algorithm
+that we treat as the canonical BLIS estimator (\S\ref{subsec:continuous}),
+with robust and approximate variants discussed as extensions.
+
+\subsection{Allocation--Refit as a Generalized EM Procedure}
+\label{subsec:gem}
+
+We now formalize the \emph{allocation--refit} principle introduced in
+\S\ref{sec:allocation-refit}.
+This procedure constitutes the core estimation algorithm in BLIS.
+All estimators considered in this paper---including the baseline
+initialization, kernelized variants, and robust extensions---are instances
+or approximations of this generalized expectation--maximization (GEM)
+framework.
+
+\paragraph{Latent execution structure.}
+We consider inference execution as composed of latent execution units
+indexed by $i$ (e.g., per-step or per-token work), whose contributions to
+observed aggregate measurements are not directly observable.
+For each request $r$, let $T_r$ denote the observed aggregate execution
+time, which arises from a superposition of these latent contributions
+under dynamic overlap and concurrency.
+
+We introduce latent allocation variables
+$\{z_{ri}\}_{i}$, where $z_{ri} \in [0,1]$ denotes the fractional
+contribution of execution unit $i$ to the observed aggregate $T_r$.
+These variables satisfy the conservation constraint
 \begin{equation}
-\widehat\lambda_i \;=\; \frac{N_i}{\ell_i}.
-\label{eq:baseline_lambda_hat}
+\sum_i z_{ri} = 1
+\qquad \text{for all } r,
+\label{eq:allocation_conservation}
 \end{equation}
-This proxy is used \emph{only} to convert time integrals into step-aggregated
-token exposures in the baseline.\footnote{Implementation detail: to avoid extreme
-$\widehat{\lambda}_i$ when $\ell_i$ is very small, we may compute
-$\widehat{\lambda}_i = N_i/\max\{\ell_i, \ell_{\min}\}$ for a small
-$\ell_{\min}\ge 0$. The default $\ell_{\min}=0$ recovers
-Eq.~\eqref{eq:baseline_lambda_hat}.}
+ensuring that each observed aggregate measurement is fully allocated
+across latent execution units.
 
-\paragraph{Phase-level exposures (baseline regression features).}
-Let $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ denote the naive full-chunk prefill
-pressure and let $p^{\mathrm{dec}}(t)$ denote the decode pressure, both in units
-of tokens/step.
-Let $c(t)$ denote a chosen partial-chunk correction signal (tokens/second), e.g.,
-$c^{\mathrm{uni}}(t)$ from Eq.~\eqref{eq:uniform_corr_signal_sum},
-$c^{\mathrm{end}}(t)$ from Eq.~\eqref{eq:end_corr_signal_sum}, or $c(t)\equiv 0$
-(ablation).
-
-We define baseline phase-level exposures (tokens) as
-\begin{align}
-A^{\mathrm{pf}}_i
-&=
-\left[ \widehat\lambda_i
-\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt \right]
-\;-\;
-\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt,
-\label{eq:baseline_integrated_exposures_pf}
-\\
-A^{\mathrm{dec}}_i
-&=
-\widehat\lambda_i
-\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\,dt.
-\label{eq:baseline_integrated_exposures_dec}
-\end{align}
-
-\noindent\textbf{Unit check.}
-$\int p(t)\,dt$ has units $(\text{tokens}/\text{step})\cdot \text{sec}$ and
-$\widehat\lambda_i$ has units $\text{step}/\text{sec}$, so
-$\widehat\lambda_i\int p(t)\,dt$ is in tokens, matching the units required for
-multiplication by $\beta_1,\beta_2$ (sec/token). The correction term
-$\int c(t)\,dt$ is already in tokens and is therefore not scaled by
-$\widehat\lambda_i$.
-
-\paragraph{Baseline predictor.}
-The baseline predicts phase duration as
+\paragraph{Allocation step (E-step).}
+Given current parameter estimates $\beta^{(k)}$, the allocation step
+computes soft responsibilities
 \begin{equation}
-\widehat \ell_i(\beta)
+z_{ri}^{(k)}
+\;\propto\;
+\mathcal{K}_r(i;\beta^{(k)}),
+\label{eq:allocation_step}
+\end{equation}
+where $\mathcal{K}_r(\cdot)$ is an allocation kernel that encodes prior
+knowledge about execution overlap, temporal locality, and interference.
+The kernel is normalized to satisfy
+\eqref{eq:allocation_conservation}.
+Different choices of $\mathcal{K}_r$ correspond to different instantiations
+of the same allocation--refit principle.
+
+\paragraph{Refit step (M-step).}
+Given allocation weights $\{z_{ri}^{(k)}\}$, the refit step updates the
+model parameters by solving
+\begin{equation}
+\beta^{(k+1)}
 =
-\beta_0\,N_i
-+
-\beta_1\,A^{\mathrm{pf}}_i
-+
-\beta_2\,A^{\mathrm{dec}}_i,
-\label{eq:baseline_predictor}
-\end{equation}
-where $\beta_0$ has units seconds/step and $\beta_1,\beta_2$ have units
-seconds/token, consistent with the step-level model in Eq.~\eqref{eq:step_model}.
-
-\paragraph{NNLS estimation.}
-Given a set of phase instances $\mathcal{I}$, we estimate $\beta$ via
-non-negative least squares:
-\begin{equation}
-\min_{\beta \in \mathbb{R}^3_{\ge 0}}
-\sum_{i\in\mathcal{I}}
+\arg\min_{\beta \ge 0}
+\sum_r
 \left(
-\widehat \ell_i(\beta) - \ell_i
-\right)^2 .
-\label{eq:baseline_nnls}
-\end{equation}
-
-\paragraph{Bridge to EM.}
-The baseline yields a single globally consistent coefficient estimate using only
-trace-derived overlap signals.
-Its simplifying assumption is the phase-local uniformity implicit in
-$\widehat\lambda_i$: the baseline does not attempt to infer how steps are
-distributed across the trace-induced grid within a phase, nor can it localize
-the final partial prefill chunk in step space.
-Section~\ref{sec:em_estimation} removes these limitations by introducing explicit
-latent step-allocation variables over the trace grid, using a coefficient-driven
-step-density model to compute expected allocations, and incorporating the final
-partial prefill chunk exactly at the trace-visible prefill end boundary.
-As in the baseline, all computations remain trace-only; the additional structure
-is used only to reallocate step exposure within trace-visible phase windows.
-
-% ============================================================
-\subsection{Idealized EM Formulation (Conceptual)}
-\label{sec:em_idealized}
-
-We now recast trace-only coefficient estimation as an idealized
-Expectation--Maximization (EM) procedure.
-The goal of this subsection is conceptual: it makes explicit \emph{what EM is
-doing} (latent step allocation under a step-rate model, followed by coefficient
-refitting) in the simplest setting where traces are perfectly aligned with
-engine execution.
-The robust, implementation-facing variant used in practice---which relaxes these
-idealizations via a fixed micro-grid, boundary-local soft membership, and
-fractional steps---is presented next in Section~\ref{sec:em_kernelized}.
-
-\paragraph{Idealized alignment assumption.}
-We assume that every trace-visible phase boundary coincides with a global
-busy-loop step boundary.
-Consequently, each phase instance $i$ spans an integer number $N_i$ of complete
-execution steps, and, for a prefill phase, the \emph{final} prefill step
-terminates exactly at the trace-visible prefill end time.
-
-\paragraph{Trace-induced grid.}
-Let $\{[g_j,g_{j+1})\}_{j=1}^J$ be the partition of time induced by the union of
-all trace-visible phase boundaries.
-Under the alignment assumption, each grid boundary is a step boundary, and each
-cell contains an integer number of whole steps.
-For a phase instance $i$ with window $[t_{i,s},t_{i,e})$, define the set of
-contained cells
-\[
-\mathcal{J}(i)
-=
-\bigl\{ j : [g_j,g_{j+1}) \subseteq [t_{i,s},t_{i,e}) \bigr\}.
-\]
-
-\paragraph{Latent step allocation.}
-Although the total number of steps $N_i$ is inferred from tokens (Section~\ref{sec:problem_setup}),
-the trace does not reveal how those steps are distributed over the overlapping
-time cells.
-We therefore introduce latent integer variables
-\[
-Z_{ij}\in\{0,1,2,\dots\},
-\qquad
-\sum_{j\in\mathcal{J}(i)} Z_{ij} = N_i,
-\]
-where $Z_{ij}$ is the (unobserved) number of busy-loop steps of phase $i$ that
-execute within cell $j$.
-
-\paragraph{Cell-level step-rate model.}
-Given coefficients $\beta=(\beta_0,\beta_1,\beta_2)$, each cell $j$ induces a
-local step-time proxy
-\begin{equation}
-\Delta_j(\beta)
-=
-\beta_0
-+
-\beta_1\,p^{\mathrm{pf}}_{\mathrm{full},j}
-+
-\beta_2\,p^{\mathrm{dec}}_j,
-\qquad
-\lambda_j(\beta)=\frac{1}{\Delta_j(\beta)},
-\label{eq:idealized_step_rate}
-\end{equation}
-where $p^{\mathrm{pf}}_{\mathrm{full},j}$ and $p^{\mathrm{dec}}_j$ are the
-trace-derived full-chunk prefill and decode pressures on cell $j$ (Section~\ref{sec:pressures}).
-Here $\lambda_j(\beta)$ plays the role of a trace-only \emph{step density}
-(steps/second) within cell $j$.
-
-\paragraph{E-step (idealized).}
-Conditioned on $\beta^{(m-1)}$, we allocate the $N_i$ steps of phase $i$ across
-cells in proportion to local step density:
-\begin{equation}
-(Z_{ij})_{j\in\mathcal{J}(i)}
-\;\big|\;\beta^{(m-1)}
-\sim
-\mathrm{Multinomial}\!\left(
-N_i,\;
-(\pi^{(m)}_{ij})_{j\in\mathcal{J}(i)}
-\right),
-\qquad
-\pi^{(m)}_{ij}
-=
-\frac{\lambda_j(\beta^{(m-1)})}
-{\sum_{u\in\mathcal{J}(i)} \lambda_u(\beta^{(m-1)})}.
-\label{eq:idealized_pi}
-\end{equation}
-Thus, the expected step count in cell $j$ is $\mathbb{E}[Z_{ij}]=N_i\pi^{(m)}_{ij}$.
-
-\paragraph{Exact handling of the final prefill step (idealized).}
-For a prefill request $r$, exactly one step is the final (possibly partial)
-chunk step.
-Under idealized alignment, that step lies in the unique cell $j^\star(r)$ whose
-right boundary coincides with the trace-visible prefill end time,
-$g_{j^\star(r)+1}=t_{r,e}$.
-We treat this final step as deterministically localized, and account for its
-missing token mass $\mu_r=C-\rho_r$ (Section~\ref{sec:prefill_correction}) exactly
-once.
-This is the only place where prefill chunking enters the EM logic: it modifies
-the \emph{effective} prefill work attributed to cell $j^\star(r)$ while leaving
-the rest of the step allocation unchanged.
-
-\paragraph{M-step (idealized).}
-Given the expected allocations (equivalently, expected step-averaged pressures),
-we update $\beta$ by solving the same non-negative least squares refit used in
-the full EM derivation:
-\begin{equation}
-\beta^{(m)}
-=
-\arg\min_{\beta\ge 0}
-\sum_{i\in\mathcal{I}}
-\left(
-N_i\beta_0
-+
-[N_i\bar p^{\mathrm{pf},(m)}_i]\beta_1
-+
-[N_i\bar p^{\mathrm{dec},(m)}_i]\beta_2
+T_r
 -
-\ell_i
-\right)^2,
-\label{eq:idealized_mstep}
+\sum_i z_{ri}^{(k)}\,\beta_i
+\right)^2
++
+\mathcal{R}(\beta),
+\label{eq:refit_step}
 \end{equation}
-where $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ are the
-iteration-$m$ expected step-averaged prefill and decode pressures of phase $i$.
+where $\mathcal{R}(\beta)$ denotes optional regularization or robustness
+terms.
+This step corresponds to a weighted least-squares update and is convex
+under standard choices of $\mathcal{R}$.
 
-\paragraph{What this idealized EM clarifies.}
-The baseline estimator (Section~\ref{sec:baseline}) may be viewed as a
-\emph{single-shot} approximation to this EM structure: it collapses the latent
-step allocation into a phase-local constant step density proxy
-$\widehat\lambda_i=N_i/\ell_i$, thereby replacing the E-step by a deterministic
-time-to-step conversion, and then performs the same NNLS-style coefficient fit.
-EM improves on the baseline by repeatedly re-estimating step allocation using a
-step-density model induced by the current $\beta$.
+\paragraph{Generalized EM interpretation.}
+Together, the allocation and refit steps define a generalized EM
+procedure.
+The allocation step computes soft responsibilities over latent execution
+structure, while the refit step updates parameters given these
+responsibilities.
+Because the refit step need only decrease (rather than globally minimize)
+the objective, this formulation naturally accommodates approximate solvers,
+robust losses, and constrained updates.
 
-\paragraph{Why we need a practical variant.}
-The idealized alignment assumption is fragile in real traces.
-Even small instrumentation delays can (i) create spurious, extremely small
-trace-induced cells and (ii) force all uncertainty to concentrate into those
-cells, which destabilizes the step allocation.
-Section~\ref{sec:em_kernelized} replaces the trace-induced grid with a fixed
-micro-grid, uses boundary-local \emph{kernelized} soft membership to model
-positive timestamp lag, and performs EM over \emph{fractional} step mass, while
-preserving the ``exactly one final prefill step'' invariant in expectation.
+The baseline estimator introduced in \S\ref{subsec:baseline} corresponds
+to a degenerate single-pass instance of this procedure, in which allocation
+weights are fixed a priori and no iterative refinement is performed.
+Conversely, more expressive allocation kernels yield progressively more
+accurate attribution under concurrent execution.
 
-% ============================================================
-\subsection{Theoretical Properties (Idealized EM)}
-\label{sec:em_theory_idealized}
-
-\begin{theorem}[Monotonic Improvement and Convergence (Idealized EM)]
-\label{thm:em_convergence_idealized}
-Let $\{\beta^{(m)}\}_{m\ge 0}$ be the sequence produced by the idealized EM
-procedure described in Section~\ref{sec:em_idealized}, with an M-step that solves
-the non-negative least squares problem in Eq.~\eqref{eq:idealized_mstep}.
-Then the EM surrogate objective minimized at each iteration is non-increasing
-across iterations, and every accumulation point of $\{\beta^{(m)}\}$ is a
-stationary point of the corresponding constrained least-squares refit.
-\end{theorem}
-
-\begin{proof}
-At iteration $m$, the E-step defines a conditional distribution over latent step
-allocations $\{Z_{ij}\}$ given $\beta^{(m-1)}$ via
-Eq.~\eqref{eq:idealized_pi}, while incorporating the deterministic localization
-of the final prefill step (and its missing token mass) as a hard constraint.
-The M-step then minimizes, over $\beta\ge 0$, the conditional expectation of the
-complete-data squared-error loss under that distribution.
-This yields a convex non-negative least squares problem
-(Eq.~\eqref{eq:idealized_mstep}), and therefore each iteration decreases (or
-leaves unchanged) the EM surrogate objective.
-Standard EM convergence results then imply that any accumulation point of the
-iterates is a stationary point of the constrained refit.
-See \cite{dempster1977em,wu1983convergence} for general statements.
-\end{proof}
-
-\paragraph{Remark (relationship to the practical EM).}
-The kernelized EM in Section~\ref{sec:em_kernelized} can be viewed as a robust
-generalization of this idealized procedure in which (i) the trace-induced grid is
-replaced by a fixed micro-grid, (ii) hard phase membership is replaced by
-boundary-local soft membership weights, and (iii) integer allocations are
-replaced by fractional step mass.
-Under vanishing timestamp lag and a grid that coincides with trace boundaries,
-the kernelized EM reduces to the idealized formulation.
-
-% ============================================================
-\subsection{A Unified Meta-Algorithm: Allocation--Refit (Generalized EM) View}
-\label{sec:meta_gem}
+\paragraph{Canonical instantiation.}
+Among the many possible instantiations of this meta-algorithm, we treat
+the continuous kernelized allocation--refit procedure introduced in
+\S\ref{subsec:continuous} as the canonical BLIS estimator.
+This formulation preserves exact mass conservation while avoiding
+discretization artifacts, and serves as the primary focus of our empirical
+evaluation.
 
 We now present a single meta-algorithm that subsumes the baseline NNLS estimator
 (Section~\ref{sec:baseline}), the idealized EM (Section~\ref{sec:em_idealized}),
@@ -1192,6 +1015,442 @@ true step boundaries. This matches BLIS's goal: stable estimation of
 non-intrusive.
 \end{remark}
 
+\subsection{Baseline Allocation for Initialization}
+\label{subsec:baseline}
+
+We begin with a simple baseline estimator that serves as a
+\emph{principled initialization} for the allocation--refit procedure
+introduced in \S\ref{subsec:gem}.
+This estimator is not intended as a final solution, but rather as a
+single-pass approximation that establishes feasibility, identifiability,
+and a stable starting point for subsequent refinement.
+
+\paragraph{Problem setting.}
+Consider a collection of inference requests indexed by $r$.
+Each request is associated with an observed aggregate execution time
+$T_r$, corresponding to the total time spent in a given execution phase
+(e.g., prefill or decode).
+This aggregate time is the sum of contributions from a sequence of latent
+execution units indexed by $i$ (e.g., per-step or per-token work),
+with unknown per-unit coefficients $\beta_i \ge 0$.
+
+Let $N_{ri}$ denote the known count of execution units of type $i$
+contributing to request $r$.\footnote{In practice, $N_{ri}$ may correspond
+to token counts, step counts, or other discrete workload measures derived
+from traces or model metadata.}
+The aggregate observation can then be written as
+\begin{equation}
+T_r \;=\; \sum_i N_{ri}\,\beta_i + \varepsilon_r,
+\label{eq:baseline_model}
+\end{equation}
+where $\varepsilon_r$ captures measurement noise and unmodeled effects.
+
+\paragraph{Baseline estimator.}
+The baseline estimate $\widehat{\beta}^{(0)}$ is obtained by solving the
+non-negative least squares problem
+\begin{equation}
+\widehat{\beta}^{(0)}
+\;=\;
+\arg\min_{\beta \ge 0}
+\sum_r
+\left(
+T_r - \sum_i N_{ri}\,\beta_i
+\right)^2.
+\label{eq:baseline_nnls}
+\end{equation}
+This optimization is convex and admits efficient solvers.
+The non-negativity constraint enforces physical plausibility and ensures
+that the resulting coefficients correspond to valid execution costs.
+
+\paragraph{Interpretation as degenerate allocation--refit.}
+From the perspective of the allocation--refit framework, the baseline
+estimator corresponds to a \emph{degenerate single-pass instance} in which
+allocation weights are fixed a priori.
+Specifically, each execution unit $i$ contributing to request $r$ is
+assigned a uniform fractional responsibility proportional to $N_{ri}$,
+and no iterative reallocation is performed.
+The refit step then reduces to solving \eqref{eq:baseline_nnls} once.
+
+This interpretation clarifies the role of the baseline: it performs a
+coarse attribution of aggregate execution time to latent units under the
+assumption of uniform overlap and no temporal interference.
+While this assumption is violated under concurrent execution, the resulting
+coefficients provide a stable and interpretable initialization.
+
+\paragraph{Role in the overall estimation pipeline.}
+In the remainder of this paper, we use $\widehat{\beta}^{(0)}$ exclusively
+as an initialization for iterative allocation--refit procedures.
+All subsequent estimators refine these coefficients by explicitly modeling
+overlap, interference, and partial observability through soft allocation
+kernels.
+Empirically, we find that this initialization accelerates convergence and
+improves numerical stability, while having negligible impact on final
+estimates once refinement is applied.
+
+\subsection{Continuous Kernelized Allocation--Refit}
+\label{subsec:continuous}
+
+We now present the continuous kernelized allocation--refit procedure,
+which we treat as the \emph{canonical BLIS estimator}.
+This formulation instantiates the generalized allocation--refit framework
+(\S\ref{subsec:gem}) using continuous allocation kernels that preserve
+exact mass conservation while avoiding discretization artifacts inherent
+to grid-based approaches.
+
+\paragraph{Continuous latent execution timeline.}
+We model inference execution on a continuous latent timeline
+$t \in \mathbb{R}_{\ge 0}$.
+Each request $r$ occupies an unknown execution interval
+$[s_r, e_r] \subset \mathbb{R}_{\ge 0}$, corresponding to a given execution
+phase (e.g., prefill or decode).
+Observed aggregate execution times $T_r$ correspond to integrals over
+latent execution cost densities along this timeline.
+
+Let $\beta(t) \ge 0$ denote the instantaneous execution cost density.
+The aggregate observation can be written as
+\begin{equation}
+T_r
+=
+\int_{s_r}^{e_r}
+\beta(t)\,dt
++
+\varepsilon_r,
+\label{eq:continuous_observation}
+\end{equation}
+where $\varepsilon_r$ captures measurement noise.
+
+\paragraph{Kernelized allocation.}
+Given a current estimate $\beta^{(k)}(t)$, we define a normalized
+allocation kernel
+\begin{equation}
+z_r^{(k)}(t)
+=
+\frac{
+\phi_r(t)\,\beta^{(k)}(t)
+}{
+\int_{s_r}^{e_r}
+\phi_r(u)\,\beta^{(k)}(u)\,du
+},
+\qquad
+t \in [s_r, e_r],
+\label{eq:continuous_allocation}
+\end{equation}
+where $\phi_r(t) \ge 0$ is a request-specific kernel encoding prior
+knowledge about temporal locality, boundary uncertainty, or execution
+structure.
+By construction,
+\begin{equation}
+\int_{s_r}^{e_r} z_r^{(k)}(t)\,dt = 1,
+\label{eq:continuous_conservation}
+\end{equation}
+ensuring exact mass conservation.
+
+\paragraph{Refit via weighted regression.}
+Given allocation densities $\{z_r^{(k)}(t)\}$, we update the execution cost
+density by minimizing the functional objective
+\begin{equation}
+\beta^{(k+1)}
+=
+\arg\min_{\beta \ge 0}
+\sum_r
+\left(
+T_r
+-
+\int_{s_r}^{e_r}
+z_r^{(k)}(t)\,\beta(t)\,dt
+\right)^2
++
+\lambda
+\int
+\|\nabla \beta(t)\|^2\,dt.
+\label{eq:continuous_refit}
+\end{equation}
+The regularization term promotes smoothness and numerical stability, and
+may be omitted or replaced depending on modeling assumptions.
+In practice, $\beta(t)$ is represented in a finite-dimensional basis
+(e.g., piecewise constant or spline basis), reducing
+\eqref{eq:continuous_refit} to a convex optimization problem.
+
+\paragraph{Relationship to discrete and deterministic variants.}
+Discrete grid-based EM procedures arise as special cases of this
+formulation when $\beta(t)$ is constrained to a fixed micro-grid and
+$\phi_r(t)$ is chosen to be piecewise constant.
+Similarly, deterministic step-density reweighting and MM-style updates
+correspond to replacing the probabilistic allocation
+\eqref{eq:continuous_allocation} with hard or heuristic assignments.
+The continuous kernelized formulation strictly generalizes these
+approaches while avoiding grid-alignment artifacts and sensitivity to
+discretization resolution.
+
+\paragraph{Convergence and stability.}
+Each iteration of the continuous allocation--refit procedure decreases
+the aggregate reconstruction error in \eqref{eq:continuous_refit},
+subject to regularization.
+Empirically, we observe rapid convergence (typically within a small
+number of iterations) when initialized from the baseline estimator
+(\S\ref{subsec:baseline}).
+The continuous formulation is particularly stable under heavy overlap
+and partial observability, as allocation mass is redistributed smoothly
+rather than discretely.
+
+\paragraph{Summary.}
+The continuous kernelized allocation--refit procedure provides a
+principled, numerically stable, and implementation-friendly instantiation
+of the BLIS framework.
+It serves as the primary estimator evaluated in this paper, with other
+variants interpreted as approximations or extensions under specific
+practical constraints.
+
+\subsection{Variants and Extensions}
+\label{subsec:variants}
+
+The continuous kernelized allocation--refit procedure presented in
+\S\ref{subsec:continuous} serves as the canonical BLIS estimator.
+In practice, however, operational constraints such as robustness
+requirements, observability limitations, or deployment considerations
+may motivate alternative instantiations.
+We now briefly describe several such variants, all of which are naturally
+interpreted as approximations or extensions of the same underlying
+allocation--refit framework.
+
+\paragraph{Robust refit via iteratively reweighted least squares.}
+In environments with heavy-tailed noise or transient interference,
+the squared-error objective in the refit step
+(\eqref{eq:continuous_refit}) may be sensitive to outliers.
+A robust alternative replaces the quadratic loss with a convex
+robust loss (e.g., Huber or Tukey), yielding an iteratively reweighted
+least-squares (IRLS) update.
+Within the allocation--refit framework, this modification affects only
+the refit step and preserves the generalized EM structure.
+
+\paragraph{Discrete and grid-based approximations.}
+Discrete grid-based EM procedures arise when the latent execution timeline
+is discretized into fixed micro-intervals and $\beta(t)$ is constrained
+to be piecewise constant on this grid.
+While such discretizations simplify implementation, they introduce
+resolution-dependent artifacts and boundary sensitivity.
+These methods are best understood as numerical approximations to the
+continuous kernelized formulation, and are therefore omitted from the
+main presentation.
+
+\paragraph{Deterministic and MM-style updates.}
+Deterministic step-density reweighting and minorization--maximization
+(MM) procedures correspond to replacing the probabilistic allocation
+kernel with hard or heuristic assignments.
+Although these updates may be computationally convenient, they sacrifice
+the soft attribution and uncertainty propagation provided by the GEM
+formulation.
+We view such methods as coarse approximations suitable primarily for
+exploratory analysis or constrained environments.
+
+\paragraph{Partial observability and client-side measurements.}
+In some deployments, fine-grained execution traces are unavailable and
+only client-observed end-to-end latencies can be collected.
+The allocation--refit framework naturally accommodates this setting by
+treating unobserved execution intervals as latent and allocating client
+measurements over feasible execution windows.
+This variant preserves the same algorithmic structure while operating
+under weaker observability assumptions.
+
+\paragraph{Featureized and hierarchical extensions.}
+For transfer across models, hardware platforms, or software versions,
+the refit step may be augmented with featureized or hierarchical
+parameterizations.
+In this setting, $\beta$ is modeled as a function of system- or
+request-level features, and the refit step corresponds to updating shared
+latent representations rather than environment-specific coefficients.
+This extension enables cold-start calibration and multi-environment
+generalization without altering the allocation--refit backbone.
+
+\paragraph{Summary.}
+All variants discussed above preserve the core allocation--refit
+structure and differ only in the choice of allocation kernel,
+refit objective, or parameterization.
+Accordingly, we treat them as extensions of the canonical BLIS estimator
+rather than independent algorithms.
+Our empirical evaluation focuses on the continuous kernelized formulation,
+with selected variants examined to illustrate robustness and deployment
+tradeoffs.
+
+% ============================================================
+\subsection{Idealized EM Formulation (Conceptual)}
+\label{sec:em_idealized}
+
+We now recast trace-only coefficient estimation as an idealized
+Expectation--Maximization (EM) procedure.
+The goal of this subsection is conceptual: it makes explicit \emph{what EM is
+doing} (latent step allocation under a step-rate model, followed by coefficient
+refitting) in the simplest setting where traces are perfectly aligned with
+engine execution.
+The robust, implementation-facing variant used in practice---which relaxes these
+idealizations via a fixed micro-grid, boundary-local soft membership, and
+fractional steps---is presented next in Section~\ref{sec:em_kernelized}.
+
+\paragraph{Idealized alignment assumption.}
+We assume that every trace-visible phase boundary coincides with a global
+busy-loop step boundary.
+Consequently, each phase instance $i$ spans an integer number $N_i$ of complete
+execution steps, and, for a prefill phase, the \emph{final} prefill step
+terminates exactly at the trace-visible prefill end time.
+
+\paragraph{Trace-induced grid.}
+Let $\{[g_j,g_{j+1})\}_{j=1}^J$ be the partition of time induced by the union of
+all trace-visible phase boundaries.
+Under the alignment assumption, each grid boundary is a step boundary, and each
+cell contains an integer number of whole steps.
+For a phase instance $i$ with window $[t_{i,s},t_{i,e})$, define the set of
+contained cells
+\[
+\mathcal{J}(i)
+=
+\bigl\{ j : [g_j,g_{j+1}) \subseteq [t_{i,s},t_{i,e}) \bigr\}.
+\]
+
+\paragraph{Latent step allocation.}
+Although the total number of steps $N_i$ is inferred from tokens (Section~\ref{sec:problem_setup}),
+the trace does not reveal how those steps are distributed over the overlapping
+time cells.
+We therefore introduce latent integer variables
+\[
+Z_{ij}\in\{0,1,2,\dots\},
+\qquad
+\sum_{j\in\mathcal{J}(i)} Z_{ij} = N_i,
+\]
+where $Z_{ij}$ is the (unobserved) number of busy-loop steps of phase $i$ that
+execute within cell $j$.
+
+\paragraph{Cell-level step-rate model.}
+Given coefficients $\beta=(\beta_0,\beta_1,\beta_2)$, each cell $j$ induces a
+local step-time proxy
+\begin{equation}
+\Delta_j(\beta)
+=
+\beta_0
++
+\beta_1\,p^{\mathrm{pf}}_{\mathrm{full},j}
++
+\beta_2\,p^{\mathrm{dec}}_j,
+\qquad
+\lambda_j(\beta)=\frac{1}{\Delta_j(\beta)},
+\label{eq:idealized_step_rate}
+\end{equation}
+where $p^{\mathrm{pf}}_{\mathrm{full},j}$ and $p^{\mathrm{dec}}_j$ are the
+trace-derived full-chunk prefill and decode pressures on cell $j$ (Section~\ref{sec:pressures}).
+Here $\lambda_j(\beta)$ plays the role of a trace-only \emph{step density}
+(steps/second) within cell $j$.
+
+\paragraph{E-step (idealized).}
+Conditioned on $\beta^{(m-1)}$, we allocate the $N_i$ steps of phase $i$ across
+cells in proportion to local step density:
+\begin{equation}
+(Z_{ij})_{j\in\mathcal{J}(i)}
+\;\big|\;\beta^{(m-1)}
+\sim
+\mathrm{Multinomial}\!\left(
+N_i,\;
+(\pi^{(m)}_{ij})_{j\in\mathcal{J}(i)}
+\right),
+\qquad
+\pi^{(m)}_{ij}
+=
+\frac{\lambda_j(\beta^{(m-1)})}
+{\sum_{u\in\mathcal{J}(i)} \lambda_u(\beta^{(m-1)})}.
+\label{eq:idealized_pi}
+\end{equation}
+Thus, the expected step count in cell $j$ is $\mathbb{E}[Z_{ij}]=N_i\pi^{(m)}_{ij}$.
+
+\paragraph{Exact handling of the final prefill step (idealized).}
+For a prefill request $r$, exactly one step is the final (possibly partial)
+chunk step.
+Under idealized alignment, that step lies in the unique cell $j^\star(r)$ whose
+right boundary coincides with the trace-visible prefill end time,
+$g_{j^\star(r)+1}=t_{r,e}$.
+We treat this final step as deterministically localized, and account for its
+missing token mass $\mu_r=C-\rho_r$ (Section~\ref{sec:prefill_correction}) exactly
+once.
+This is the only place where prefill chunking enters the EM logic: it modifies
+the \emph{effective} prefill work attributed to cell $j^\star(r)$ while leaving
+the rest of the step allocation unchanged.
+
+\paragraph{M-step (idealized).}
+Given the expected allocations (equivalently, expected step-averaged pressures),
+we update $\beta$ by solving the same non-negative least squares refit used in
+the full EM derivation:
+\begin{equation}
+\beta^{(m)}
+=
+\arg\min_{\beta\ge 0}
+\sum_{i\in\mathcal{I}}
+\left(
+N_i\beta_0
++
+[N_i\bar p^{\mathrm{pf},(m)}_i]\beta_1
++
+[N_i\bar p^{\mathrm{dec},(m)}_i]\beta_2
+-
+\ell_i
+\right)^2,
+\label{eq:idealized_mstep}
+\end{equation}
+where $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ are the
+iteration-$m$ expected step-averaged prefill and decode pressures of phase $i$.
+
+\paragraph{What this idealized EM clarifies.}
+The baseline estimator (Section~\ref{sec:baseline}) may be viewed as a
+\emph{single-shot} approximation to this EM structure: it collapses the latent
+step allocation into a phase-local constant step density proxy
+$\widehat\lambda_i=N_i/\ell_i$, thereby replacing the E-step by a deterministic
+time-to-step conversion, and then performs the same NNLS-style coefficient fit.
+EM improves on the baseline by repeatedly re-estimating step allocation using a
+step-density model induced by the current $\beta$.
+
+\paragraph{Why we need a practical variant.}
+The idealized alignment assumption is fragile in real traces.
+Even small instrumentation delays can (i) create spurious, extremely small
+trace-induced cells and (ii) force all uncertainty to concentrate into those
+cells, which destabilizes the step allocation.
+Section~\ref{sec:em_kernelized} replaces the trace-induced grid with a fixed
+micro-grid, uses boundary-local \emph{kernelized} soft membership to model
+positive timestamp lag, and performs EM over \emph{fractional} step mass, while
+preserving the ``exactly one final prefill step'' invariant in expectation.
+
+% ============================================================
+\subsection{Theoretical Properties (Idealized EM)}
+\label{sec:em_theory_idealized}
+
+\begin{theorem}[Monotonic Improvement and Convergence (Idealized EM)]
+\label{thm:em_convergence_idealized}
+Let $\{\beta^{(m)}\}_{m\ge 0}$ be the sequence produced by the idealized EM
+procedure described in Section~\ref{sec:em_idealized}, with an M-step that solves
+the non-negative least squares problem in Eq.~\eqref{eq:idealized_mstep}.
+Then the EM surrogate objective minimized at each iteration is non-increasing
+across iterations, and every accumulation point of $\{\beta^{(m)}\}$ is a
+stationary point of the corresponding constrained least-squares refit.
+\end{theorem}
+
+\begin{proof}
+At iteration $m$, the E-step defines a conditional distribution over latent step
+allocations $\{Z_{ij}\}$ given $\beta^{(m-1)}$ via
+Eq.~\eqref{eq:idealized_pi}, while incorporating the deterministic localization
+of the final prefill step (and its missing token mass) as a hard constraint.
+The M-step then minimizes, over $\beta\ge 0$, the conditional expectation of the
+complete-data squared-error loss under that distribution.
+This yields a convex non-negative least squares problem
+(Eq.~\eqref{eq:idealized_mstep}), and therefore each iteration decreases (or
+leaves unchanged) the EM surrogate objective.
+Standard EM convergence results then imply that any accumulation point of the
+iterates is a stationary point of the constrained refit.
+See \cite{dempster1977em,wu1983convergence} for general statements.
+\end{proof}
+
+\paragraph{Remark (relationship to the practical EM).}
+The kernelized EM in Section~\ref{sec:em_kernelized} can be viewed as a robust
+generalization of this idealized procedure in which (i) the trace-induced grid is
+replaced by a fixed micro-grid, (ii) hard phase membership is replaced by
+boundary-local soft membership weights, and (iii) integer allocations are
+replaced by fractional step mass.
+Under vanishing timestamp lag and a grid that coincides with trace boundaries,
+the kernelized EM reduces to the idealized formulation.
 
 \iffalse
 % ============================================================
