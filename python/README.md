@@ -1,12 +1,10 @@
 # Trace-Only Beta Estimation (Python)
 
 This directory contains the reference Python implementation of the
-**trace-only baseline estimator** for step-level execution coefficients
-\((\beta_0,\beta_1,\beta_2)\) described in the paper.
+**trace-only baseline and iterative estimators** for step-level execution coefficients \((\beta_0,\beta_1,\beta_2)\) described in the paper.
 
-The estimator reconstructs token pressures from phase overlap,
-forms time-integrated exposures, and fits a non-negative least-squares model.
-No step boundaries or engine instrumentation are required.
+The estimators reconstructs token pressures from phase overlap,
+forms time-integrated and (latent) step-averaged exposures, and fits a non-negative least-squares model. No step boundaries or engine instrumentation are required.
 
 ## Setup
 
@@ -86,9 +84,13 @@ Beta history (last few iters):
 
 ## Run with sample traces
 
+For the baseline algorithm, try:
+
 ```bash
 python examples/run.py --csv data/traces/sample.csv --chunk-size 64
 ```
+
+For the iterative algorithm, try:
 
 ```bash
 python examples/run.py --csv data/traces/sample.csv --chunk-size 64 --algo iterative --correction-mode beta_informed --damping-eta 1.0
@@ -102,16 +104,18 @@ with start/end timestamps and token counts.
 ```text
 estimators/
   baseline.py   # baseline time-integrated NNLS estimator
+  iterative.py  # Majorization-Minimization (MM)-style iterative NNLS estimator
+
 ```
 
-The main entry point is:
+The main entry points are:
 
 ```python
 estimate_betas_baseline(phases: pd.DataFrame, chunk_size: int, ...)
+estimate_betas_iterative(phases: pd.DataFrame, chunk_size: int, ...)
 ```
 
-See the docstring of `estimate_betas_baseline` for the precise schema
-and the mapping to paper notation.
+See their docstrings for the precise schema and the mapping to paper notation.
 
 
 ## Testing and Coverage
