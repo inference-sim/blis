@@ -704,6 +704,32 @@ def _reconstruct_pressures(
 
     return p_pf_full, p_dec, I_pf_full, I_dec
 
+# baseline.py
+def _prefill_missing_mass_mu(
+    P: np.ndarray,
+    N: np.ndarray,
+    *,
+    chunk_size: int,
+) -> np.ndarray:
+    """
+    Compute missing prefill token mass μ = C - ρ where ρ = P - C*(N-1).
+
+    Inputs
+    ------
+    P : array, tokens
+    N : array, steps (integer-ish)
+    chunk_size : int, C
+
+    Output
+    ------
+    mu : array, tokens, in [0, C]
+    """
+    C = float(chunk_size)
+    rho = P - C * (N - 1.0)
+    rho = np.clip(rho, 0.0, C)
+    mu = C - rho
+    return np.clip(mu, 0.0, C)
+
 
 def _build_uniform_partial_chunk_correction_rate(
     df: pd.DataFrame,
@@ -783,10 +809,7 @@ def _build_uniform_partial_chunk_correction_rate(
     P = prefill_df[prefill_tokens_col].astype(float).to_numpy()
     N = prefill_df[n_steps_col].astype(float).to_numpy()
 
-    rho = P - float(chunk_size) * (N - 1.0)
-    rho = np.clip(rho, 0.0, float(chunk_size))
-    mu = float(chunk_size) - rho
-    mu = np.clip(mu, 0.0, float(chunk_size))
+    mu = _prefill_missing_mass_mu(P, N, chunk_size=chunk_size)
 
     dur = re - rs
     if np.any(dur <= 0):
@@ -874,11 +897,7 @@ def _build_end_partial_chunk_correction_rate(
     P = prefill_df[prefill_tokens_col].astype(float).to_numpy()
     N = prefill_df[n_steps_col].astype(float).to_numpy()
 
-    # Compute missing mass μ_r = C - ρ_r, where ρ_r = P_r - C*(N_r-1)
-    rho = P - float(chunk_size) * (N - 1.0)
-    rho = np.clip(rho, 0.0, float(chunk_size))
-    mu = float(chunk_size) - rho
-    mu = np.clip(mu, 0.0, float(chunk_size))
+    mu = _prefill_missing_mass_mu(P, N, chunk_size=chunk_size)
 
     # Identify the grid segment containing t_end.
     # Using half-open segments [grid[j], grid[j+1]), we compute:

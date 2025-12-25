@@ -4,6 +4,7 @@
 \usepackage{times}
 \usepackage{graphicx}
 \usepackage{amsmath, amssymb}
+\usepackage{mathtools} % for \xmapsto
 \usepackage{bm}
 \usepackage[most]{tcolorbox}
 \usepackage{tabularx}
@@ -212,7 +213,7 @@ per-step timings, or engine instrumentation are assumed.
 Table~\ref{tab:notation_summary} summarizes the principal symbols used in
 this section and their units.
 
-\begin{table}[h]
+\begin{table}[ht!]
 \centering
 \small
 \begin{tabular}{lll}
@@ -336,7 +337,7 @@ a standard trace-inferred choice is
 $N_i = \lceil P_r / C \rceil$.\footnote{
 Prefix-cached tokens do not contribute to execution steps and are therefore
 excluded from $P_r$. This treatment is consistent with the execution semantics
-of vLLM-style inference engines~\cite{vllm}.
+of vLLM-style inference engines.
 }
 
 % ============================================================
@@ -430,9 +431,9 @@ which treats each active prefill request as contributing $C$ tokens per step.
 Any accounting for the final partial prefill chunk is represented separately,
 either through a correction \emph{in exposure space} in the baseline
 (via $c(t)$), or through an \emph{iteration-indexed effective pressure}
-$\tilde p^{\mathrm{pf},(m)}(t)$ constructed from the 
-current iterate $\beta^{(m)}$ (Section~\ref{sec:beta_informed_prefill_correction}).
-
+$\tilde p^{\mathrm{pf},(m)}(t)$ constructed during iteration $m$ from the
+\emph{previous} iterate $\beta^{(m-1)}$ via the induced step density
+(Section~\ref{sec:beta_informed_prefill_correction}).
 
 \subsubsection{Prefill Chunking and Partial-Chunk Correction Signals}
 \label{sec:prefill_correction}
@@ -710,11 +711,11 @@ prefill partial chunk using the inferred step-density model.
 \Require Phase traces, chunk size $C$, initial coefficients $\beta^{(0)}$, tolerance $\epsilon$
 \Ensure Refined execution coefficients $\beta^\star$
 
-\State initialize $\beta \gets \beta^{(0)}$
-\Comment{baseline NNLS initialization; §\ref{sec:baseline}, Eq.~\eqref{eq:baseline_nnls}}
+\State initialize $\beta^{(0)} \gets$ baseline NNLS estimate
+\Comment{§\ref{sec:baseline}, Eq.~\eqref{eq:baseline_nnls}}
 
-\Repeat
-  \State compute step density across time intervals from $\beta$
+\For{$m=1,2,\dots$}
+  \State compute $\Delta^{(m)}(t)$ and $\lambda^{(m)}(t)$ from $\beta^{(m-1)}$
   \Comment{\emph{instantaneous} step-time and step-density on the trace grid; §\ref{sec:local_step_density}, Eq.~\eqref{eq:local_step_time_m}, Eq.~\eqref{eq:step_density_m}}
 
   \State assign step exposure across time intervals
@@ -730,64 +731,97 @@ prefill partial chunk using the inferred step-density model.
     \Comment{step-averaged (i.e., step-weighted) pressures from \emph{instantaneous} pressures and phase-level attribution; §\ref{sec:step_averaged_pressures}, Eq.~\eqref{eq:step_averaged_pressures_m}}
   \EndFor
 
-  \State refit $\beta$ using frozen features
+  \State refit $\beta^{(m)}$ using frozen iteration-$m$ features
   \Comment{NNLS on step-weighted exposures $N_i\bar p_i^{\mathrm{pf}}$ and $N_i\bar p_i^{\mathrm{dec}}$ (tokens), holding attribution fixed; §\ref{sec:step_density}, Eq.~\eqref{eq:sr_nnls_m}}
 
-\Until{change in $\beta$ is below $\epsilon$}
+  \If{$\|\beta^{(m)}-\beta^{(m-1)}\|_2 < \epsilon$} 
+    \State \textbf{break}
+  \EndIf
+\EndFor
 
+\State set $\beta^\star \gets \beta^{(m)}$
 \State \Return $\beta^\star$
+
 \end{algorithmic}
 \end{algorithm}
 
+\paragraph{Iteration semantics.}
+At the start of iteration $m$, the coefficient vector $\beta^{(m-1)}$ and all
+features computed in iteration $m-1$ are available.
+All quantities carrying superscript $m$ are computed \emph{during} iteration
+$m$ using $\beta^{(m-1)}$ and previously computed features, and are held fixed
+while solving for $\beta^{(m)}$.
+
+\paragraph{Update map interpretation.}
+The iterative estimator can be viewed as the repeated application of a
+deterministic update map.
+Specifically, given the previous iterate and lagged effective prefill pressure,
+the algorithm applies
+\[
+(\beta^{(m-1)},\tilde p^{\mathrm{pf},(m-1)})
+\;\xmapsto{\;\mathcal{T}\;}
+(\beta^{(m)},\tilde p^{\mathrm{pf},(m)}),
+\]
+where the update map $\mathcal{T}$ is realized through the following
+trace-only construction chain:
+\begin{align*}
+& \beta^{(m-1)}
+\;\mapsto\;
+\Delta^{(m)}(t)
+\;\mapsto\;
+\lambda^{(m)}(t)
+\;\mapsto\; 
+\bigl(q_i^{(m)}(t), q_r^{(m)}(t), F_r^{(m)}(t), \mathcal{W}_r^{(m)}\bigr)
+\;\mapsto\; \\
+& \bigl(c_r^{(m)}(t), c^{(m)}(t), \tilde p^{\mathrm{pf},(m)}(t)\bigr)
+\;\mapsto\;
+\bigl(\bar p_i^{\mathrm{pf},(m)}, \bar p_i^{\mathrm{dec},(m)}\bigr)
+\;\mapsto\;
+\beta^{(m)}.
+\end{align*}
+All quantities with superscript $(m)$ are computed during iteration $m$ from
+$\beta^{(m-1)}$ and trace-derived signals, then held fixed while solving the
+NNLS subproblem for $\beta^{(m)}$.
 
 
 \subsubsection{Local Step-Time Model and Step Density (Iteration-Indexed)}
 \label{sec:local_step_density}
 
 The iterative estimator proceeds in outer iterations indexed by $m$.
-At iteration $m$, we treat the current coefficient vector $\beta^{(m)}$
+At the start of iteration $m$, we treat the current coefficient vector $\beta^{(m-1)}$
 as fixed and construct a trace-only step-density proxy on the trace-induced
 time grid. All attribution quantities computed from this proxy (e.g.,
 $q_i^{(m)}$, $q_r^{(m)}$, $\mathcal{W}_r^{(m)}$, $c^{(m)}$, and
-$\bar p_i^{(\cdot),(m)}$) are then held fixed while solving for $\beta^{(m+1)}$
+$\bar p_i^{(\cdot),(m)}$) are then held fixed while solving for $\beta^{(m)}$
 via an NNLS subproblem.
 
-Given instantaneous pressures, define the iteration-$m$ local step-time model
+Given instantaneous pressures and the effective prefill pressure $\tilde p^{\mathrm{pf},(m-1)}(t)$
+computed in the previous iteration (and held fixed), define the iteration-$m$
+local step-time model as
 \begin{equation}
 \Delta^{(m)}(t)
 =
-\beta^{(m)}_0
+\beta^{(m-1)}_0
 +
-\beta^{(m)}_1\,\tilde p^{\mathrm{pf},(m)}(t)
+\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}(t)
 +
-\beta^{(m)}_2\,p^{\mathrm{dec}}(t),
+\beta^{(m-1)}_2\,p^{\mathrm{dec}}(t),
 \qquad \Delta^{(m)}(t) > 0.
 \label{eq:local_step_time_m}
 \end{equation}
+
 The induced \emph{step density} (steps/sec) is
 \begin{equation}
 \lambda^{(m)}(t) = \frac{1}{\Delta^{(m)}(t)}.
 \label{eq:step_density_m}
 \end{equation}
 
-This iteration-indexing eliminates circularity: $\lambda^{(m)}$ is computed
-from $\beta^{(m)}$ and iteration-$m$ effective pressures, and is not defined
-implicitly in terms of itself.
-
-
 % ============================================================
 \subsubsection{$\beta$-Informed Partial-Chunk Correction (Iteration-Indexed)}
 \label{sec:beta_informed_prefill_correction}
 
-Uniform and end-localized corrections treat the temporal location of the final
-(prefill) partial chunk as exogenous. In contrast, our iterative estimator
-uses the current iterate $\beta^{(m)}$ to construct a trace-only step-density
-proxy $\lambda^{(m)}(t)$ and uses it to place the missing prefill token mass
-$\mu_r$ near the \emph{latent final prefill step}.
-
-\paragraph{Step-time attribution density.}
-Using $\lambda^{(m)}(t)$ from Eq.~\eqref{eq:step_density_m}, define the normalized
-density over request $r$'s prefill window:
+Using $\lambda^{(m)}(t)$ from Eq.~\eqref{eq:step_density_m}, define the
+normalized step-time attribution density over request $r$'s prefill window:
 \begin{equation}
 q_r^{(m)}(t)
 =
@@ -796,19 +830,13 @@ q_r^{(m)}(t)
 \int_{t_{r,s}}^{t_{r,e}} q_r^{(m)}(t)\,dt = 1.
 \label{eq:qr_def_m}
 \end{equation}
-We interpret $q_r^{(m)}$ as a \emph{trace-only step-time attribution model}
-within the prefill window, computed from $\beta^{(m)}$ and held fixed during
-the NNLS update for $\beta^{(m+1)}$.
 
-\paragraph{Last-step window under $q_r^{(m)}$.}
-Let $N_r=\lceil P_r/C\rceil$ be the inferred number of prefill steps and
-$\mu_r = C-\rho_r \in [0,C)$ be the missing token mass of the final partial
-chunk (Eq.~\eqref{eq:rho_def}). Define the $q_r^{(m)}$-CDF
+Define the corresponding CDF
 \begin{equation}
 F_r^{(m)}(t)=\int_{t_{r,s}}^{t} q_r^{(m)}(u)\,du,
 \label{eq:Fr_def_m}
 \end{equation}
-and define the \emph{last-step window} as the final $1/N_r$ fraction of step exposure:
+and the last-step window as
 \begin{equation}
 \mathcal{W}_r^{(m)}
 =
@@ -820,28 +848,18 @@ F_r^{(m)}(t)\ge 1-\tfrac{1}{N_r}
 \label{eq:last_step_window_m}
 \end{equation}
 
-\paragraph{Iteration-$m$ correction signal and induced effective pressure.}
-We concentrate the missing token mass $\mu_r$ on $\mathcal{W}_r^{(m)}$
-proportional to $q_r^{(m)}(t)$, expressed as a \emph{correction signal}
-(tokens/second) whose time integral equals $\mu_r$.
-
-Define the per-request correction signal
+The per-request correction signal (tokens/sec) is
 \begin{equation}
 c_r^{(m)}(t)
 =
 \mu_r\,
 \frac{q_r^{(m)}(t)\,\mathbf{1}\{t\in\mathcal{W}_r^{(m)}\}}
 {\int_{\mathcal{W}_r^{(m)}} q_r^{(m)}(u)\,du},
-\qquad
-\text{units: tokens/second},
 \label{eq:cr_beta_informed_m}
 \end{equation}
-and the aggregate correction $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$.
-By construction, $\int c_r^{(m)}(t)\,dt=\mu_r$.
+with aggregate correction $c^{(m)}(t)=\sum_r c_r^{(m)}(t)$.
 
-To use this correction inside the local step-time model (Eq.~\eqref{eq:local_step_time_m}),
-convert the time-based correction signal into a tokens/step decrement by dividing by
-the iteration-$m$ step density $\lambda^{(m)}(t)$:
+The effective prefill pressure is
 \begin{equation}
 \tilde p^{\mathrm{pf},(m)}(t)
 =
@@ -850,18 +868,17 @@ p^{\mathrm{pf}}_{\mathrm{full}}(t)
 \frac{c^{(m)}(t)}{\lambda^{(m)}(t)}.
 \label{eq:prefill_pressure_beta_informed_m}
 \end{equation}
+
 Since $c^{(m)}(t)/\lambda^{(m)}(t)$ has units
 $(\text{tokens}/\text{second})/(\text{steps}/\text{second})=\text{tokens}/\text{step}$,
 $\tilde p^{\mathrm{pf},(m)}(t)$ remains a tokens/step pressure.
 
-\paragraph{Trace-only implementation (integrals over a grid).}
-All quantities above enter only through integrals over the trace-induced grid
+We note that all instantaneous quantities above enter only through integrals over the trace-induced grid
 $\{[g_j,g_{j+1})\}$, on which pressures (and hence $\lambda^{(m)}$) are piecewise-constant.
-
 
 \subsubsection{Normalized Step Density within a Phase (Iteration-Indexed)}
 
-For phase instance $i$, define the iteration-$m$ phase mass
+For phase instance $i$, define the iteration-$(m)$ phase mass
 \[
 \Lambda_i^{(m)}
 =
@@ -872,16 +889,12 @@ q_i^{(m)}(t)
 \frac{\lambda^{(m)}(t)}{\Lambda_i^{(m)}}.
 \]
 By construction, $\int_{t_{i,s}}^{t_{i,e}} q_i^{(m)}(t)\,dt = 1$.
-We treat $q_i^{(m)}$ as a trace-only step-time attribution model within the
-phase window, computed from $\beta^{(m)}$ and held fixed during the NNLS update.
+All phase-level attribution quantities are computed during iteration $m$
+and held fixed while solving for $\beta^{(m)}$.
 
 \subsubsection{Step-Weighted Exposures}
 \label{sec:step_averaged_pressures}
 
-Decode phases require no partial-chunk correction: decode executes exactly one
-token per step, so the trace-inferred step count equals the token count and all
-decode work is fully accounted for by $p^{\mathrm{dec}}(t)$. For a prefill phase, 
-define
 \begin{equation}
 \bar p^{\mathrm{pf},(m)}_i
 =
@@ -892,7 +905,6 @@ define
 \int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{dec}}(t)\, q_i^{(m)}(t)\,dt.
 \label{eq:step_averaged_pressures_m}
 \end{equation}
-
 
 \paragraph{From step-averaged pressure to exposure.}
 The quantities $\bar p_i^{\mathrm{pf},(m)}$ and $\bar p_i^{\mathrm{dec},(m)}$
@@ -919,11 +931,8 @@ baseline construction (up to numerical integration error and any chosen prefill 
 
 \subsubsection{MM-Style Iterative NNLS}
 
-At iteration $m$, we use $\beta^{(m)}$ to form both the step-averaged
-pressures and the $\beta$-informed prefill correction, freeze these
-quantities, and solve
 \begin{equation}
-\beta^{(m+1)}
+\beta^{(m)}
 =
 \arg\min_{\beta\ge 0}
 \sum_{i\in\mathcal{I}}
@@ -935,27 +944,23 @@ N_i\beta_0
 \bigl[N_i\bar p^{\mathrm{dec},(m)}_i\bigr]\beta_2
 -
 \ell_i
-\right)^2 ,
+\right)^2 .
 \label{eq:sr_nnls_m}
 \end{equation}
-where $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ are computed from
-$\beta^{(m)}$ via Eqs.~\eqref{eq:local_step_time_m}--\eqref{eq:step_averaged_pressures_m}
+
+where $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ are computed 
+via Eqs.~\eqref{eq:local_step_time_m}--\eqref{eq:prefill_pressure_beta_informed_m} and \eqref{eq:step_averaged_pressures_m}
 and are held fixed while optimizing over $\beta$.
 
 Optional damping
-$\beta^{(m+1)} \leftarrow (1-\eta)\beta^{(m)} + \eta\beta^{(m+1)}$
-improves numerical stability. 
-We iterate until $\|\beta^{(m+1)} - \beta^{(m)}\|_2 < \epsilon$ or a maximum
+$\beta^{(m)} \leftarrow (1-\eta)\beta^{(m-1)} + \eta\beta^{(m)}$
+improves numerical stability. We iterate until 
+$\|\beta^{(m)} - \beta^{(m-1)}\|_2 < \epsilon$ or a maximum
 iteration count is reached. 
 
 \paragraph{Robust loss and fixed-point view.}
 To mitigate outliers, we optionally replace the squared loss in
 Eq.~\eqref{eq:sr_nnls_m} with a Huber loss $\rho_\delta$ applied to each residual.
-With this modification, each iteration still forms trace-derived features using
-$\beta^{(m)}$ and then solves a convex subproblem with those features held fixed,
-yielding an update of the form $\beta^{(m+1)}=\mathcal{F}(\beta^{(m)})$.
-We terminate when $\|\beta^{(m+1)}-\beta^{(m)}\|_2<\epsilon$ (or relative change)
-or after a fixed iteration budget.
 
 % ============================================================
 \subsection{Limitations and Scope}
