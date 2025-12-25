@@ -3535,6 +3535,650 @@ model/GPU/topology combinations, and (ii) enable rapid recalibration for a targe
 LLM, after which BLIS generalizes across workload families and serving settings
 without retraining.
 
+% ============================================================
+\subsection{Prior-Regularized Continuous EM for Per-Environment Recalibration}
+\label{sec:prior_regularized_em}
+
+The featureized formulation in Section~\ref{sec:featureized_blis} provides
+\emph{informative priors} for the step-level coefficients
+$\beta=(\beta_0,\beta_1,\beta_2)$ (and client-side coefficients $\alpha$) on a new
+deployment environment.
+We now show how to \emph{recalibrate} these coefficients for a specific LLM and
+hardware backend using \emph{trace-only data}, while preserving the robustness
+and invariants of the continuous EM / IRLS--GEM estimators introduced earlier.
+
+The resulting procedure combines:
+(i) principled transfer from previously seen environments via a prior,
+(ii) high-fidelity per-target calibration using traces,
+and (iii) monotone descent of a well-defined penalized objective.
+This is the mechanism by which BLIS supports fast bring-up on new deployments
+without sacrificing decision-equivalent accuracy.
+
+% ------------------------------------------------------------
+\subsubsection{Problem Setup and Prior}
+\label{sec:prior_setup}
+
+Fix a target environment
+\[
+e^\star \equiv (\text{LLM architecture},\;\text{GPU type},\;\text{interconnect},\;\text{serving stack}),
+\]
+and suppose that trace-level phase boundaries (prefill start/end, decode start/end)
+are observable for a set of phase instances $\mathcal{I}$.
+For each instance $i\in\mathcal{I}$ we observe:
+\begin{itemize}
+\item total phase duration $\ell_i$,
+\item step count $N_i$,
+\item token-level activity within the phase (prefill/decode tokens).
+\end{itemize}
+
+From the featureized BLIS model (Section~\ref{sec:featureized_blis}), we obtain a
+\emph{prior} coefficient vector
+\[
+\beta^{\mathrm{prior}}
+=
+\begin{bmatrix}
+\beta^{\mathrm{prior}}_0 &
+\beta^{\mathrm{prior}}_1 &
+\beta^{\mathrm{prior}}_2
+\end{bmatrix}^\top,
+\qquad \beta^{\mathrm{prior}}_k \ge 0.
+\]
+This prior represents a feature-based prediction for the target environment
+before observing any target-specific traces.
+Operationally, it provides a ``day-zero'' estimate of step cost and per-token
+costs that is already well-scaled for the model, parallelism, and hardware.
+
+We interpret this prior as the center of a regularizing distribution.
+In this section, we focus on a quadratic penalty in coefficient space, which
+corresponds to a Gaussian prior truncated to $\beta_k\ge 0$.
+(Log-normal priors in log-space are discussed in Section~\ref{sec:discussion}.)
+
+% ------------------------------------------------------------
+\subsubsection{E-step: Continuous Latent Step Allocation (Unchanged)}
+\label{sec:prior_em_estep}
+
+The E-step is identical to the continuous EM formulation in
+Section~\ref{sec:em_continuous_kernelized}.
+At EM iteration $m$, given current coefficients $\beta^{(m-1)}$, we define the
+instantaneous step duration
+\begin{equation}
+\Delta^{(m)}(t)
+=
+\beta^{(m-1)}_0
++
+\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}(t)
++
+\beta^{(m-1)}_2\,p^{\mathrm{dec}}(t),
+\label{eq:prior_delta}
+\end{equation}
+and the corresponding step-rate
+\[
+\lambda^{(m)}(t)=\frac{1}{\Delta^{(m)}(t)}.
+\]
+
+Using $\lambda^{(m)}(t)$, we compute:
+\begin{itemize}
+\item boundary membership densities $q_i^{(m)}(t)$,
+\item final-step end-localization density $q^{(m)}_{i,\mathrm{final}}(t)$,
+\item partial-chunk correction $\delta^{(m)}(t)$,
+\end{itemize}
+as described in Section~\ref{sec:em_continuous_kernelized}.
+These yield the step-averaged sufficient statistics
+\[
+\bar p^{\mathrm{pf},(m)}_i,
+\qquad
+\bar p^{\mathrm{dec},(m)}_i,
+\]
+for each phase instance $i$.
+Importantly, the E-step does \emph{not} depend on the prior; it depends only on the
+current coefficients and the trace geometry.
+All structural invariants of BLIS (boundary alignment, partial-step handling,
+and continuous-time robustness) are preserved.
+
+% ------------------------------------------------------------
+\subsubsection{M-step: Prior-Regularized Refit (MAP Update)}
+\label{sec:prior_em_mstep}
+
+Given E-step sufficient statistics at iteration $m$, we refit $\beta$ by solving
+a \emph{prior-regularized} regression problem.
+
+For each phase instance $i$, define the design vector
+\[
+x_i
+=
+\begin{bmatrix}
+x_{i0} & x_{i1} & x_{i2}
+\end{bmatrix}
+=
+\begin{bmatrix}
+N_i &
+N_i\,\bar p^{\mathrm{pf},(m)}_i &
+N_i\,\bar p^{\mathrm{dec},(m)}_i
+\end{bmatrix},
+\]
+and residual
+\[
+r_i(\beta) = x_i^\top \beta - \ell_i.
+\]
+
+\paragraph{Quadratic (Gaussian) prior.}
+The M-step computes the maximum a posteriori (MAP) estimate
+\begin{equation}
+\beta^{(m)}
+=
+\arg\min_{\beta \ge 0}
+\;
+\sum_{i\in\mathcal{I}}
+w_i^{(m)}\, r_i(\beta)^2
+\;+\;
+\lambda \,\|\beta-\beta^{\mathrm{prior}}\|_2^2,
+\label{eq:prior_mstep}
+\end{equation}
+where:
+\begin{itemize}
+\item $w_i^{(m)}$ are iteration-dependent weights,
+\item $\lambda>0$ controls the strength of the prior.
+\end{itemize}
+
+Setting $w_i^{(m)}\equiv 1$ recovers a \emph{prior-regularized continuous EM}
+update.
+Choosing $w_i^{(m)}$ via an M-estimator (e.g., Huber loss) yields a
+\emph{prior-regularized IRLS--GEM} update that is robust to outliers and trace
+noise.
+
+Problem~\eqref{eq:prior_mstep} is a small-dimensional
+ridge-regularized nonnegative least-squares (NNLS) problem.
+It is strongly convex for $\lambda>0$, admits a unique minimizer, and can be
+solved efficiently using standard NNLS or projected second-order methods.
+We warm-start from $\beta^{(m-1)}$ or $\beta^{\mathrm{prior}}$.
+
+\paragraph{Interpretation.}
+The prior acts as a \emph{soft anchor}:
+\begin{itemize}
+\item with limited trace diversity, $\beta^{(m)}$ remains close to
+      $\beta^{\mathrm{prior}}$,
+\item as informative target-specific traces accumulate, the data likelihood
+      dominates and $\beta^{(m)}$ moves toward the environment-optimal values.
+\end{itemize}
+This realizes fast, stable recalibration without sacrificing asymptotic
+fidelity.
+
+% ------------------------------------------------------------
+\subsubsection{Algorithm Summary}
+\label{sec:prior_em_algorithm}
+
+\paragraph{Prior-Regularized Robust Continuous EM (Per-Environment).}
+\begin{enumerate}
+\item \textbf{Initialization:}
+      set $\beta^{(0)}=\beta^{\mathrm{prior}}$.
+\item \textbf{E-step:}
+      compute $\Delta^{(m)}(t)$, boundary densities, and
+      $\bar p^{\mathrm{pf},(m)}_i,\bar p^{\mathrm{dec},(m)}_i$.
+\item \textbf{M-step:}
+      solve~\eqref{eq:prior_mstep} for $\beta^{(m)}$.
+\item \textbf{Repeat} until convergence.
+\end{enumerate}
+
+The same procedure applies when calibrating client-only coefficients $\alpha$,
+with the E-step replaced by the corresponding client-side latent decomposition
+(Section~\emph{TBD: client-only model}) and the M-step defined analogously with a
+feature-derived prior.
+
+% ------------------------------------------------------------
+\subsubsection{Convergence and Stability}
+\label{sec:prior_em_theory}
+
+The above procedure is a special case of a \emph{penalized generalized EM (GEM)}
+algorithm.
+
+\begin{proposition}[Monotone Descent of the Penalized Objective]
+\label{prop:prior_gem}
+Assume the instantaneous step duration is clamped so that
+$\Delta^{(m)}(t)\ge\Delta_{\min}>0$ for all $t$.
+If the M-step produces $\beta^{(m)}$ satisfying
+\[
+\sum_i w_i^{(m)} r_i(\beta^{(m)})^2 + \lambda\|\beta^{(m)}-\beta^{\mathrm{prior}}\|_2^2
+\;\le\;
+\sum_i w_i^{(m)} r_i(\beta^{(m-1)})^2 + \lambda\|\beta^{(m-1)}-\beta^{\mathrm{prior}}\|_2^2,
+\]
+then the penalized EM objective is non-increasing across iterations.
+Every accumulation point of $\{\beta^{(m)}\}$ is a stationary point of the
+penalized refit problem.
+\end{proposition}
+
+\begin{proof}[Sketch]
+With clamped $\Delta^{(m)}(t)$, the E-step produces finite sufficient statistics.
+The M-step performs a (possibly inexact) descent on a strongly convex penalized
+objective in $\beta$.
+Standard GEM arguments imply monotone decrease and stationarity of accumulation
+points.
+\end{proof}
+
+\paragraph{Takeaway.}
+Prior-regularized continuous EM provides a clean separation of concerns:
+featureized BLIS supplies a portable, informative prior across models and
+hardware, while trace-only recalibration recovers high-fidelity coefficients for
+a specific LLM and backend.
+Once calibrated, the resulting simulator generalizes across workloads and vLLM
+settings without retraining, which is the core requirement for
+decision-equivalent benchmarking at large scale.
+
+% ============================================================
+\subsection{Joint Trace--Client Calibration: Multi-View Estimation with Shared Structure}
+\label{sec:joint_trace_client}
+
+Modern LLM deployments often expose \emph{heterogeneous observability}:
+short calibration windows with rich server-side traces, and long-running
+production workloads where only client-visible measurements are available.
+Treating these data sources in isolation leaves statistical efficiency and
+systems realism on the table.
+In this section, we present a unified calibration framework that \emph{jointly}
+leverages trace-level and client-side observations to produce a single,
+well-calibrated simulator.
+
+Our approach rests on three principles:
+(i) \emph{shared structure}—both data sources are generated by the same latent
+engine dynamics and thus share the same step-level coefficients;
+(ii) \emph{complementary identifiability}—traces identify internal execution
+structure, while client data anchors scale and operating regime; and
+(iii) \emph{separation of concerns}—featureized priors provide portability across
+environments, while per-environment recalibration preserves fidelity.
+
+% ------------------------------------------------------------
+\subsubsection{Observation Model: Two Views of the Same System}
+\label{sec:joint_observation_model}
+
+We consider a fixed target environment $e^\star$ (LLM, hardware, topology, and
+serving stack).
+Let $\beta=(\beta_0,\beta_1,\beta_2)$ denote the engine step coefficients, and
+$\alpha$ the client-side coefficients (network and serialization effects).
+
+\paragraph{Trace view.}
+For each trace-observed phase instance $i\in\mathcal{I}_{\mathrm{trace}}$, we
+observe phase duration $\ell_i$, step count $N_i$, and token activity within the
+phase.
+As in Sections~\ref{sec:em_continuous_kernelized} and
+\ref{sec:prior_regularized_em}, the conditional expectation of $\ell_i$ is
+\begin{equation}
+\mathbb{E}[\ell_i \mid \beta]
+=
+N_i\,\beta_0
++
+N_i\bar p^{\mathrm{pf}}_i\,\beta_1
++
+N_i\bar p^{\mathrm{dec}}_i\,\beta_2,
+\label{eq:trace_model_joint}
+\end{equation}
+where $\bar p^{\mathrm{pf}}_i$ and $\bar p^{\mathrm{dec}}_i$ are latent
+step-averaged pressures inferred via continuous EM.
+
+\paragraph{Client view.}
+For each client-observed request $j\in\mathcal{J}_{\mathrm{client}}$, we observe
+end-to-end response time $T_j$, arrival time, and input/output token counts
+$(n^{\mathrm{in}}_j,n^{\mathrm{out}}_j)$.
+The expected response time decomposes as
+\begin{equation}
+\mathbb{E}[T_j \mid \alpha,\beta]
+=
+T^{\mathrm{net}}_j(\alpha)
++
+T^{\mathrm{engine}}_j(\beta),
+\label{eq:client_model_joint}
+\end{equation}
+where $T^{\mathrm{net}}_j(\alpha)$ captures request-independent RTT and
+(de)serialization effects, and $T^{\mathrm{engine}}_j(\beta)$ is the simulator
+prediction under the same step-level coefficients $\beta$.
+
+Crucially, \emph{the engine coefficients $\beta$ are shared across both views}.
+The two data sources differ only in which latent components are observable.
+
+% ------------------------------------------------------------
+\subsubsection{Generalized Priors from Featureized BLIS}
+\label{sec:joint_priors}
+
+Before observing any target-specific data, we initialize both $\beta$ and
+$\alpha$ using featureized BLIS (Section~\ref{sec:featureized_blis}).
+Given environment features $(x_{e^\star},z_{e^\star})$, we obtain:
+\[
+\beta^{\mathrm{prior}}=\exp(\gamma^\top x_{e^\star}),\qquad
+\alpha^{\mathrm{prior}}=\exp(\eta^\top z_{e^\star}),
+\]
+which serve as informative, physically grounded priors for the target
+deployment.
+These priors encode cross-model, cross-parallelism, and cross-topology transfer,
+and can be learned once from a heterogeneous fleet.
+
+We interpret these as centers of regularizing distributions and retain the
+ability to deviate from them via recalibration when target-specific evidence is
+available.
+
+% ------------------------------------------------------------
+\subsubsection{Joint Calibration Objective}
+\label{sec:joint_objective}
+
+We define a unified penalized objective over shared parameters $(\beta,\alpha)$:
+\begin{equation}
+\mathcal{L}(\beta,\alpha)
+=
+\sum_{i\in\mathcal{I}_{\mathrm{trace}}}
+\ell_{\mathrm{trace}}(i;\beta)
++
+\sum_{j\in\mathcal{J}_{\mathrm{client}}}
+\ell_{\mathrm{client}}(j;\beta,\alpha)
++
+\lambda_\beta\|\beta-\beta^{\mathrm{prior}}\|_2^2
++
+\lambda_\alpha\|\alpha-\alpha^{\mathrm{prior}}\|_2^2,
+\label{eq:joint_objective}
+\end{equation}
+where:
+\begin{itemize}
+\item $\ell_{\mathrm{trace}}$ is the trace-level squared or robust loss induced by
+      Eq.~\eqref{eq:trace_model_joint} after latent step allocation,
+\item $\ell_{\mathrm{client}}$ is the client-level squared or robust loss induced
+      by Eq.~\eqref{eq:client_model_joint},
+\item the quadratic penalties implement MAP estimation under featureized priors.
+\end{itemize}
+
+This objective makes explicit that trace and client data are simply two sets of
+constraints on the same underlying parameters.
+
+% ------------------------------------------------------------
+\subsubsection{Joint Estimation via Alternating GEM}
+\label{sec:joint_gem}
+
+We minimize Eq.~\eqref{eq:joint_objective} using an alternating generalized EM
+(GEM) procedure.
+
+\paragraph{E-steps (multi-view).}
+At iteration $m$:
+\begin{itemize}
+\item \textbf{Trace E-step:} given $\beta^{(m-1)}$, compute continuous-time latent
+      step allocations and sufficient statistics
+      $(\bar p^{\mathrm{pf},(m)}_i,\bar p^{\mathrm{dec},(m)}_i)$ for all
+      $i\in\mathcal{I}_{\mathrm{trace}}$.
+\item \textbf{Client E-step:} given $(\beta^{(m-1)},\alpha^{(m-1)})$, compute
+      latent client-side decompositions (e.g., separating network and engine
+      contributions) as in Section~\emph{TBD: client-only model}.
+\end{itemize}
+
+\paragraph{M-step (shared parameters).}
+Given all sufficient statistics, update $(\beta,\alpha)$ by solving the
+regularized refit:
+\begin{equation}
+(\beta^{(m)},\alpha^{(m)})
+=
+\arg\min_{\beta\ge 0,\;\alpha\ge 0}
+\;
+\mathcal{L}(\beta,\alpha),
+\label{eq:joint_mstep}
+\end{equation}
+with optional IRLS weights for robustness.
+This step couples the two data sources through the shared $\beta$ parameters,
+while allowing $\alpha$ to be informed exclusively by client-side evidence.
+
+\paragraph{Special cases.}
+\begin{itemize}
+\item \textbf{Trace-only calibration:} $\mathcal{J}_{\mathrm{client}}=\varnothing$
+      reduces to prior-regularized continuous EM
+      (Section~\ref{sec:prior_regularized_em}).
+\item \textbf{Client-only calibration:} $\mathcal{I}_{\mathrm{trace}}=\varnothing$
+      reduces to the client-only model with featureized priors.
+\item \textbf{Trace-first refinement:} initialize $\beta$ using trace-only EM,
+      then incorporate client data to refine scale and tail behavior.
+\end{itemize}
+
+% ------------------------------------------------------------
+\subsubsection{Why Joint Calibration Helps}
+\label{sec:joint_benefits}
+
+\paragraph{Improved identifiability.}
+Trace data sharply identifies the \emph{structure} of engine execution
+(prefill vs.\ decode, partial chunks, scheduling interactions), while client data
+anchors the \emph{operating regime} (arrival dynamics, contention, and tail
+behavior).
+Joint estimation strictly increases information content relative to either view
+alone, reducing variance and preventing degenerate fits.
+
+\paragraph{Distributional robustness.}
+Traces are typically collected under controlled workloads, whereas client data
+reflects real traffic.
+By sharing parameters, the calibrated simulator remains faithful to internal
+mechanics while being anchored to production-scale behavior.
+
+\paragraph{Operational practicality.}
+In practice, rich traces may only be available intermittently.
+Joint calibration allows BLIS to:
+(i) initialize from fleet-level featureized priors,
+(ii) rapidly recalibrate using a short trace window, and
+(iii) continuously refine using abundant client-side measurements thereafter.
+
+% ------------------------------------------------------------
+\subsubsection{Recalibration and Generalization Protocol}
+\label{sec:joint_protocol}
+
+We recommend the following workflow:
+\begin{enumerate}
+\item \textbf{Global prior learning:} fit featureized parameters $(\gamma,\eta)$
+      across diverse environments.
+\item \textbf{Target bring-up:} initialize $(\beta,\alpha)$ from priors for
+      $e^\star$.
+\item \textbf{Trace-assisted recalibration:} run prior-regularized continuous
+      EM using a small set of traces to lock in step-level structure.
+\item \textbf{Client-driven refinement:} incorporate client-side data to refine
+      scale, contention effects, and tails.
+\item \textbf{Zero-shot workload generalization:} evaluate new workloads and vLLM
+      settings without retraining.
+\end{enumerate}
+
+\paragraph{Summary.}
+Joint trace--client calibration casts BLIS as a multi-view estimator: traces and
+client measurements are two lenses on the same underlying system.
+By unifying them through shared coefficients and featureized priors, BLIS
+achieves both portability and fidelity—key requirements for decision-equivalent
+benchmarking in complex LLM serving systems.
+
+% ============================================================
+\section{Hierarchical Multi-View GEM with Featureized Coefficients}
+\label{sec:hierarchical_multiview_gem}
+
+We now present a unifying formulation that \emph{jointly} learns
+(i) featureized execution coefficients that generalize across models,
+hardware, and deployment configurations, and
+(ii) environment-specific recalibrations that capture residual effects
+visible only through local measurements.
+This formulation subsumes the baseline estimator, the continuous EM,
+the robust IRLS--GEM, and the joint trace--client calibration as special
+cases, while eliminating the statistical inefficiency of
+two-stage ``estimate-then-regress'' pipelines.
+
+\paragraph{Environments and observations.}
+Let $e\in\mathcal{E}$ index deployment environments, where each environment
+corresponds to a fixed combination of:
+model architecture (dense or MoE), parallelism configuration
+(TP, DP, EP), hardware and interconnect, and serving stack.
+Each environment $e$ is associated with:
+\begin{itemize}
+  \item a set of trace-observed phase instances
+        $\mathcal{I}_e^{\mathrm{trace}}$,
+  \item a set of client-observed requests
+        $\mathcal{J}_e^{\mathrm{client}}$,
+  \item feature vectors $x_e$ (engine-side features) and $z_e$
+        (client/network-side features).
+\end{itemize}
+
+Our goal is to estimate execution coefficients
+$(\beta_e,\alpha_e)$ for each environment $e$ in a way that
+shares statistical strength across environments while allowing
+target-specific recalibration.
+
+% ------------------------------------------------------------
+\paragraph{Featureized coefficients with residual recalibration.}
+
+We parameterize environment-specific coefficients as
+\begin{align}
+\beta_e &= \exp(\Gamma x_e) \odot u_e,
+\label{eq:hier_beta}
+\\
+\alpha_e &= \exp(H z_e) \odot v_e,
+\label{eq:hier_alpha}
+\end{align}
+where:
+\begin{itemize}
+  \item $\Gamma$ and $H$ are global feature matrices shared across all
+        environments,
+  \item $u_e$ and $v_e$ are environment-specific residual vectors,
+  \item $\odot$ denotes elementwise multiplication.
+\end{itemize}
+
+The featureized terms $\exp(\Gamma x_e)$ and $\exp(H z_e)$ define
+\emph{population-level prior means} for execution coefficients,
+while the residuals $(u_e,v_e)$ capture environment-specific deviations
+(e.g., kernel versions, memory pressure, topology quirks)
+that are not fully explained by the feature set.
+Positivity of coefficients is enforced by construction.
+
+% ------------------------------------------------------------
+\paragraph{Multi-view likelihood.}
+
+For each environment $e$, the trace and client observations provide
+two complementary views of the same latent execution dynamics.
+
+\emph{Trace view.}
+For each phase instance $i\in\mathcal{I}_e^{\mathrm{trace}}$,
+the expected phase duration under the step-level model is
+\begin{equation}
+\mathbb{E}[\ell_i \mid \beta_e]
+=
+N_i \beta_{e,0}
++
+N_i \bar p^{\mathrm{pf}}_i(\beta_e)\, \beta_{e,1}
++
+N_i \bar p^{\mathrm{dec}}_i(\beta_e)\, \beta_{e,2},
+\label{eq:hier_trace_model}
+\end{equation}
+where $\bar p^{\mathrm{pf}}_i(\cdot)$ and $\bar p^{\mathrm{dec}}_i(\cdot)$
+are the step-averaged pressures computed via the continuous EM
+allocation induced by $\beta_e$.
+
+\emph{Client view.}
+For each client-observed request
+$j\in\mathcal{J}_e^{\mathrm{client}}$, the expected response time is
+\begin{equation}
+\mathbb{E}[T_j \mid \beta_e,\alpha_e]
+=
+T^{\mathrm{net}}_j(\alpha_e)
++
+T^{\mathrm{engine}}_j(\beta_e),
+\label{eq:hier_client_model}
+\end{equation}
+where $T^{\mathrm{engine}}_j(\beta_e)$ is obtained by running the BLIS
+simulator with coefficients $\beta_e$, and
+$T^{\mathrm{net}}_j(\alpha_e)$ captures request-independent RTT and
+(de)serialization costs.
+
+% ------------------------------------------------------------
+\paragraph{Hierarchical objective (MAP formulation).}
+
+We jointly estimate global feature parameters
+$(\Gamma,H)$ and environment-specific residuals
+$\{u_e,v_e\}_{e\in\mathcal{E}}$ by minimizing the regularized
+multi-view objective
+\begin{align}
+\mathcal{L}
+=
+\sum_{e\in\mathcal{E}}
+\Bigg[
+&
+\sum_{i\in\mathcal{I}_e^{\mathrm{trace}}}
+\ell_{\mathrm{trace}}\!\left(
+\ell_i;\beta_e
+\right)
++
+\sum_{j\in\mathcal{J}_e^{\mathrm{client}}}
+\ell_{\mathrm{client}}\!\left(
+T_j;\beta_e,\alpha_e
+\right)
+\Bigg]
+\nonumber\\
+&
++
+\lambda_u
+\sum_{e\in\mathcal{E}}
+\|\log u_e\|_2^2
++
+\lambda_v
+\sum_{e\in\mathcal{E}}
+\|\log v_e\|_2^2,
+\label{eq:hier_objective}
+\end{align}
+where $\ell_{\mathrm{trace}}$ and $\ell_{\mathrm{client}}$ are squared
+or robust (Huber) losses.
+The regularizers correspond to Gaussian priors on
+$\log u_e$ and $\log v_e$, implementing \emph{partial pooling}:
+environment-specific recalibration is allowed, but penalized unless
+supported by sufficient evidence.
+
+Notably, no direct penalty is imposed on $\Gamma$ or $H$; these parameters
+are identified purely through shared structure across environments.
+
+% ------------------------------------------------------------
+\paragraph{Hierarchical GEM algorithm.}
+
+We minimize Eq.~\eqref{eq:hier_objective} using a hierarchical
+generalized EM procedure.
+
+\emph{E-step (per environment).}
+At iteration $m$, for each environment $e$:
+\begin{itemize}
+  \item compute continuous-time step densities and latent allocations
+        using the current $\beta_e^{(m-1)}$,
+  \item form trace sufficient statistics
+        $\{\bar p^{\mathrm{pf},(m)}_i,\bar p^{\mathrm{dec},(m)}_i\}$,
+  \item compute client-side latent decompositions if applicable.
+\end{itemize}
+
+\emph{M-step (global + local).}
+Holding all latent allocations fixed, update
+$(\Gamma,H,\{u_e,v_e\})$ by minimizing the convex objective obtained by
+substituting Eq.~\eqref{eq:hier_beta}--\eqref{eq:hier_alpha} into
+Eq.~\eqref{eq:hier_objective}.
+This step decomposes into:
+(i) a global regression for $\Gamma$ and $H$ driven by aggregated
+evidence across environments, and
+(ii) independent regularized updates for each $(u_e,v_e)$.
+
+Optional IRLS weights may be applied to obtain a robust
+IRLS--GEM variant without altering the structure of the algorithm.
+
+% ------------------------------------------------------------
+\paragraph{Special cases and connections.}
+
+This formulation recovers several estimators presented earlier:
+\begin{itemize}
+  \item \textbf{Baseline:} single environment, $u_e\equiv 1$, no client data,
+        one collapsed GEM iteration.
+  \item \textbf{Continuous EM:} single environment, fixed $(\Gamma,H)$,
+        unconstrained $u_e$.
+  \item \textbf{Joint trace--client calibration:} fixed $(\Gamma,H)$,
+        environment-specific $(u_e,v_e)$.
+  \item \textbf{Client-only calibration:} $\mathcal{I}_e^{\mathrm{trace}}=\varnothing$.
+\end{itemize}
+
+% ------------------------------------------------------------
+\paragraph{Interpretation.}
+
+Hierarchical multi-view GEM casts BLIS as a statistically principled,
+mechanistic hierarchical model.
+Featureized coefficients encode transferable structure across models,
+parallelism strategies, and hardware backends, while residual
+recalibration absorbs environment-specific effects.
+By optimizing both levels jointly from raw observations, the estimator
+achieves lower variance, improved identifiability, and robust
+generalization—key properties for decision-equivalent benchmarking
+in large-scale LLM inference systems.
+
+
 \bibliographystyle{plain}
 \bibliography{blis}
 
