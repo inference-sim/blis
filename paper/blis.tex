@@ -928,7 +928,6 @@ If $\lambda^{(m)}(t)$ is approximately constant over $[t_{i,s},t_{i,e})$, then
 $q_i^{(m)}(t)$ is approximately uniform and these step-weighted exposures reduce to the
 baseline construction (up to numerical integration error and any chosen prefill correction).
 
-
 \subsubsection{MM-Style Iterative NNLS}
 
 \begin{equation}
@@ -978,5 +977,219 @@ path to step-level calibration using only production traces.
 The estimated coefficients $\beta^\star$ are used directly in the step-time
 model (Eq.~\eqref{eq:step_model}) of the discrete-event simulator.
 
+% ============================================================
+\subsection{EM-Based Trace-Only Estimation with Partial-Chunk Correction}
+\label{sec:em_estimation}
+
+We now present an alternative formulation of the step-density--reweighted estimator
+as a principled Expectation--Maximization (EM) algorithm.
+This view simplifies the implementation, provides a clear probabilistic
+interpretation, and yields standard monotonic-improvement guarantees.
+
+The key idea is to treat the \emph{allocation of execution steps over wall-clock
+time} as latent, while directly accounting for the fact that the final prefill
+step of each request may process a partial chunk.
+
+% ------------------------------------------------------------
+\subsubsection{Latent Variables on the Trace Grid}
+
+Let $\{[g_j,g_{j+1})\}_{j=1}^J$ denote the trace-induced time grid formed by all
+phase boundaries.
+Instantaneous prefill and decode pressures are piecewise-constant on this grid.
+
+For each phase instance $i$ with trace-visible window $[t_{i,s},t_{i,e})$ and
+trace-inferred step count $N_i$, define
+\[
+\mathcal{J}(i)
+=
+\bigl\{j : [g_j,g_{j+1}) \cap [t_{i,s},t_{i,e}) \neq \emptyset\bigr\}.
+\]
+
+We introduce the following latent variables.
+
+\paragraph{Latent step allocation.}
+For each phase $i$ and grid cell $j\in\mathcal{J}(i)$, let
+\[
+Z_{ij} \in \{0,1,2,\dots\}
+\quad\text{with}\quad
+\sum_{j\in\mathcal{J}(i)} Z_{ij} = N_i,
+\]
+where $Z_{ij}$ represents the (unobserved) number of busy-loop steps of phase $i$
+that occur while wall-clock time lies in grid interval $j$.
+
+\paragraph{Latent location of the final prefill step.}
+For each request $r$ in its prefill phase, recall that exactly one of the $N_r$
+prefill steps is partial, with missing token mass $\mu_r=C-\rho_r$.
+We introduce a categorical latent variable
+\[
+L_r \in \mathcal{J}(r),
+\]
+which denotes the grid cell containing the \emph{final prefill step} of request $r$.
+
+These latent variables allow us to model both step allocation and partial-chunk
+correction in a unified, trace-only framework.
+
+% ------------------------------------------------------------
+\subsubsection{Step-Rate Model (Complete-Data Likelihood)}
+
+At EM iteration $m$, we treat the coefficient vector $\beta^{(m-1)}$ as fixed and
+define a step-time proxy on each grid cell $j$:
+\begin{equation}
+\Delta^{(m)}_j
+=
+\beta^{(m-1)}_0
++
+\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}_j
++
+\beta^{(m-1)}_2\,p^{\mathrm{dec}}_j,
+\qquad
+\lambda^{(m)}_j=\frac{1}{\Delta^{(m)}_j}.
+\label{eq:em_step_rate}
+\end{equation}
+Here $p^{\mathrm{dec}}_j$ and $\tilde p^{\mathrm{pf},(m-1)}_j$ denote the decode and
+effective prefill pressures on grid cell $j$, respectively.
+
+Conditioned on $N_i$, we assume that steps of phase $i$ are allocated across grid
+cells proportionally to step density times cell duration:
+\begin{equation}
+(Z_{ij})_{j\in\mathcal{J}(i)}
+\;\big|\;
+N_i,\beta^{(m-1)}
+\sim
+\mathrm{Multinomial}\!\left(
+N_i;
+(\pi^{(m)}_{ij})_{j\in\mathcal{J}(i)}
+\right),
+\label{eq:em_multinomial}
+\end{equation}
+where
+\begin{equation}
+\pi^{(m)}_{ij}
+=
+\frac{\lambda^{(m)}_j\,|[g_j,g_{j+1}) \cap [t_{i,s},t_{i,e})|}
+{\sum_{u\in\mathcal{J}(i)} \lambda^{(m)}_u\,|[g_u,g_{u+1}) \cap [t_{i,s},t_{i,e})|}.
+\label{eq:em_pi}
+\end{equation}
+
+Similarly, for each prefill request $r$, the latent last-step location $L_r$ is
+modeled as
+\begin{equation}
+\Pr(L_r=j \mid \beta^{(m-1)})
+=
+\frac{\lambda^{(m)}_j\,|[g_j,g_{j+1}) \cap [t_{r,s},t_{r,e})|}
+{\sum_{u\in\mathcal{J}(r)} \lambda^{(m)}_u\,|[g_u,g_{u+1}) \cap [t_{r,s},t_{r,e})|}.
+\label{eq:em_last_step}
+\end{equation}
+
+This distribution expresses trace-only uncertainty about where the final prefill
+step occurs, weighted by the induced step density.
+
+% ------------------------------------------------------------
+\subsubsection{E-Step: Expected Step-Weighted Exposures}
+
+Because pressures are constant on each grid cell, the expected step-averaged
+pressures for phase $i$ are
+\begin{align}
+\bar p^{\mathrm{dec},(m)}_i
+&=
+\sum_{j\in\mathcal{J}(i)} \pi^{(m)}_{ij}\, p^{\mathrm{dec}}_j,
+\label{eq:em_dec_exposure}
+\\
+\bar p^{\mathrm{pf},(m)}_i
+&=
+\sum_{j\in\mathcal{J}(i)} \pi^{(m)}_{ij}\, \tilde p^{\mathrm{pf},(m)}_j.
+\label{eq:em_pf_exposure}
+\end{align}
+
+\paragraph{Expected partial-chunk correction.}
+Using Eq.~\eqref{eq:em_last_step}, the expected correction mass assigned to grid
+cell $j$ is
+\[
+\mathbb{E}[c^{(m)}_j]
+=
+\sum_r
+\mu_r\,
+\Pr(L_r=j \mid \beta^{(m-1)})
+\Big/
+(g_{j+1}-g_j),
+\]
+with units tokens/second.
+The effective prefill pressure is then updated as
+\begin{equation}
+\tilde p^{\mathrm{pf},(m)}_j
+=
+p^{\mathrm{pf}}_{\mathrm{full},j}
+-
+\frac{\mathbb{E}[c^{(m)}_j]}{\lambda^{(m)}_j},
+\label{eq:em_pf_effective}
+\end{equation}
+which preserves units of tokens/step and ensures that exactly one partial chunk
+per request is accounted for in expectation.
+
+% ------------------------------------------------------------
+\subsubsection{M-Step: Coefficient Update}
+
+With $\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ fixed, we update
+$\beta$ by solving the convex NNLS problem
+\begin{equation}
+\beta^{(m)}
+=
+\arg\min_{\beta\ge 0}
+\sum_{i\in\mathcal{I}}
+\left(
+N_i\beta_0
++
+[N_i\bar p^{\mathrm{pf},(m)}_i]\beta_1
++
+[N_i\bar p^{\mathrm{dec},(m)}_i]\beta_2
+-
+\ell_i
+\right)^2.
+\label{eq:em_mstep}
+\end{equation}
+
+Iterations proceed until convergence of $\beta$.
+
+% ------------------------------------------------------------
+\subsubsection{Interpretation}
+
+The EM algorithm alternates between:
+(i) computing the expected step-level workload and expected location of the final
+prefill step under the current step-rate model (E-step), and
+(ii) refitting the execution coefficients to best explain observed phase
+durations given these expectations (M-step).
+
+All computations are trace-only and require no reconstruction of actual step
+boundaries.
+
+\begin{theorem}[Monotonic Improvement of the EM Estimator]
+\label{thm:em_monotonic}
+Let $\{\beta^{(m)}\}_{m\ge 0}$ be the sequence generated by the EM algorithm in
+Section~\ref{sec:em_estimation}.
+Then the observed-data objective
+\[
+\sum_{i\in\mathcal{I}} (\widehat\ell_i(\beta)-\ell_i)^2
+\]
+is non-increasing across iterations.
+Moreover, every limit point of $\{\beta^{(m)}\}$ is a stationary point of the
+corresponding constrained least-squares problem.
+\end{theorem}
+
+\begin{proof}
+The EM algorithm constructs, at iteration $m$, a surrogate objective given by the
+conditional expectation of the complete-data squared-error loss with respect to
+the posterior distribution of latent variables
+$\{Z_{ij},L_r\}$ under $\beta^{(m-1)}$.
+
+The E-step computes the expected sufficient statistics
+(step-weighted prefill and decode exposures) exactly.
+The M-step then minimizes this surrogate objective over $\beta\ge 0$, which is a
+convex non-negative least squares problem.
+
+By standard EM theory, each iteration does not increase the observed-data
+objective, and any accumulation point of the iterates is a stationary point.
+See, e.g., \cite{dempster1977em,wu1983convergence} for general EM convergence
+results.
+\end{proof}
 
 \end{document}
