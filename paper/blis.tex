@@ -3161,6 +3161,379 @@ timeline and designed workload regimes. This enables consistent estimation of
 both request-local overhead coefficients $\alpha$ and GPU execution coefficients
 $\beta$ under realistic deployment constraints.
 
+% ============================================================
+\subsection{Featureized BLIS: Hierarchical Priors for Cross-Model, Cross-Parallelism, and Cross-Topology Transfer}
+\label{sec:featureized_blis}
+
+The estimators in Sections~\ref{sec:baseline}--\ref{sec:em_continuous_kernelized}
+are \emph{per-environment}: they recover a coefficient vector
+$\beta=(\beta_0,\beta_1,\beta_2)$ (and, in the client-only setting,
+$\alpha$-coefficients) for a fixed deployment context.
+This is the appropriate default for high-fidelity prediction, since step-time
+coefficients depend on model architecture, parallelism configuration, GPU
+microarchitecture, and interconnect topology.
+However, \emph{large-scale} deployment settings require repeatedly calibrating
+across many models and hardware platforms.
+We therefore introduce a \emph{featureized} extension of BLIS that provides:
+(i) statistically principled \emph{priors} for $\alpha$ and $\beta$ on new
+environments, (ii) \emph{partial pooling} across environments to improve
+sample-efficiency, and (iii) a clean \emph{recalibration} mechanism that preserves
+BLIS's primary strength: generalization across workloads and vLLM settings once a
+target environment is calibrated.
+
+\paragraph{Environment index.}
+Let an \emph{environment} $e$ denote a deployment context comprising
+\[
+e \equiv (\text{model configuration},\;\text{parallelism configuration},\;\text{GPU type},\;
+\text{interconnect/topology},\;\text{serving stack}).
+\]
+Each phase instance $i$ (trace-only) or request instance (client-only) is
+associated with exactly one environment, denoted $e(i)$.
+
+\paragraph{High-level idea.}
+Rather than fitting a separate coefficient vector for each environment with no
+sharing, we model coefficients as the sum of:
+(i) a \emph{global} feature-based predictor governed by a small parameter vector
+$\gamma$ shared across all environments, and
+(ii) an \emph{environment-specific} offset (recalibration term) that absorbs
+unmodeled stack details (kernel variants, driver differences, etc.).
+This yields transfer \emph{without} collapsing BLIS into a black-box regressor:
+the latent-step allocation (E-step) and step-level structure remain unchanged,
+and only the coefficient parameterization in the M-step is modified.
+
+% ------------------------------------------------------------
+\subsubsection{Feature Map Design}
+\label{sec:feature_map_design}
+
+We construct an environment feature vector $x_e\in\mathbb{R}^d$ by concatenating
+three interpretable blocks: model architecture, parallelism, and hardware/network
+characteristics. The feature map is designed to cover:
+(i) dense and Mixture-of-Experts (MoE) architectures,
+(ii) tensor and data parallelism, including expert parallelism over
+$\mathrm{TP}\times\mathrm{DP}$ GPUs,
+and (iii) GPU and interconnect regimes (NVLink/NVSwitch/PCIe/Ethernet).
+
+\paragraph{(A) Model architecture features (dense and MoE).}
+Let the model configuration expose standard architectural fields:
+number of layers $L$, model width $d$, attention heads $h$, head dimension
+$d_h=d/h$, and MLP dimension $d_{\mathrm{ff}}$ (dense) or per-expert dimension
+$d_{\mathrm{exp}}$ (MoE). Let $b_{\mathrm{KV}}$ denote bytes per KV element
+(KV dtype).
+
+We include two mechanistic proxies:
+\begin{enumerate}
+\item \textbf{KV footprint per token (bytes/token).}
+\begin{equation}
+\Psi_{\mathrm{KV}}
+\;=\;
+2\,L\,h\,d_h \cdot b_{\mathrm{KV}},
+\label{eq:kv_footprint}
+\end{equation}
+where the factor $2$ accounts for K and V. This proxy captures memory traffic
+and cache pressure per generated token.
+
+\item \textbf{Compute proxy per token (FLOP-like units).}
+We use architecture-derived compute surrogates that scale monotonically with the
+dominant matrix multiplications. Let $\Phi_{\mathrm{att}}$ and
+$\Phi_{\mathrm{mlp}}$ denote attention and MLP compute proxies for a single token
+(defined deterministically from $(L,d,h,d_{\mathrm{ff}})$). For dense models:
+\begin{equation}
+\Phi_{\mathrm{dense}} = \Phi_{\mathrm{att}}(L,d,h) + \Phi_{\mathrm{mlp}}(L,d,d_{\mathrm{ff}}).
+\label{eq:phi_dense}
+\end{equation}
+For MoE, let $E$ denote the number of experts, $k$ the routing top-$k$, and
+$p_{\mathrm{act}}$ the average number of active experts per token (typically
+$p_{\mathrm{act}}\approx k$). Let $\Phi_{\mathrm{exp}}$ be a per-expert compute
+proxy derived from $(L,d,d_{\mathrm{exp}})$. Then:
+\begin{equation}
+\Phi_{\mathrm{moe}} = \Phi_{\mathrm{att}}(L,d,h) + p_{\mathrm{act}}\cdot \Phi_{\mathrm{exp}}(L,d,d_{\mathrm{exp}}).
+\label{eq:phi_moe}
+\end{equation}
+\end{enumerate}
+These proxies deliberately avoid kernel-level assumptions; their role is to
+provide a stable coordinate system for transfer across architectures.
+
+\paragraph{(B) Parallelism features (TP, DP, and EP).}
+Let $\mathrm{TP}$ and $\mathrm{DP}$ denote tensor and data parallel degrees.
+In vLLM-style expert parallelism, experts are distributed across the product
+space of tensor and data parallel ranks; we therefore define the effective
+expert-parallel ``universe size'' as
+\begin{equation}
+S \;\triangleq\; \mathrm{EP} \;=\; \mathrm{TP}\cdot \mathrm{DP}.
+\label{eq:ep_universe}
+\end{equation}
+
+We include the following parallelism-sensitive proxies:
+\begin{enumerate}
+\item \textbf{Per-GPU compute proxy.}
+Tensor parallelism reduces per-GPU compute approximately proportionally:
+\begin{equation}
+\Phi_{\mathrm{gpu}} \;=\; \frac{\Phi}{\mathrm{TP}},
+\label{eq:phi_per_gpu}
+\end{equation}
+where $\Phi$ is $\Phi_{\mathrm{dense}}$ or $\Phi_{\mathrm{moe}}$ depending on the
+architecture.
+
+\item \textbf{Tensor-parallel collective intensity.}
+TP induces per-layer collectives; we model their intensity via a proxy
+\begin{equation}
+\Psi_{\mathrm{TP\mbox{-}comm}}
+\;=\;
+L \cdot f_{\mathrm{TP}}(\mathrm{TP}) \cdot b_{\mathrm{act}},
+\label{eq:tp_comm_proxy}
+\end{equation}
+where $b_{\mathrm{act}}$ is bytes per activation element (dtype-dependent) and
+$f_{\mathrm{TP}}(\mathrm{TP})$ is a monotone function capturing collective
+scaling (e.g., $\log(\mathrm{TP})$ for tree-reduction latency terms and/or a
+linear-in-$\mathrm{TP}$ bandwidth term; we include both via separate features if
+desired).
+
+\item \textbf{MoE expert dispatch intensity.}
+MoE introduces token-to-expert dispatch and (often) all-to-all communication
+over the EP universe. We capture this by a proxy
+\begin{equation}
+\Psi_{\mathrm{EP\mbox{-}comm}}
+\;=\;
+p_{\mathrm{act}} \cdot g_{\mathrm{EP}}(\mathrm{EP}) \cdot b_{\mathrm{route}},
+\label{eq:ep_comm_proxy}
+\end{equation}
+where $b_{\mathrm{route}}$ is bytes routed per token (activation payload for
+expert compute) and $g_{\mathrm{EP}}(\mathrm{EP})$ captures scaling in EP degree.
+\end{enumerate}
+
+\paragraph{(C) GPU and interconnect features (compute, memory, and topology).}
+Let $F_{\mathrm{peak}}$ denote peak tensor throughput (for the relevant dtype),
+$B_{\mathrm{HBM}}$ HBM bandwidth, and $B_{\mathrm{link}}$ the effective interconnect
+bandwidth for cross-GPU collectives (NVLink/NVSwitch/PCIe/Ethernet), with a
+topology penalty $\kappa_{\mathrm{topo}}\ge 1$ capturing hop count and
+oversubscription (e.g., NVSwitch vs non-switch fabrics).
+We include \emph{inverse capacity} features that naturally parameterize time:
+\begin{equation}
+\chi_{\mathrm{comp}}=\frac{1}{F_{\mathrm{peak}}},\qquad
+\chi_{\mathrm{mem}}=\frac{1}{B_{\mathrm{HBM}}},\qquad
+\chi_{\mathrm{link}}=\frac{\kappa_{\mathrm{topo}}}{B_{\mathrm{link}}}.
+\label{eq:inv_capacity}
+\end{equation}
+These features allow the learning procedure to represent first-order
+``work / capacity'' laws while remaining agnostic to kernel details.
+
+\paragraph{Feature vector.}
+We assemble:
+\begin{equation}
+x_e
+=
+\Bigl[
+1,\;
+\Phi_{\mathrm{gpu}},\;
+\Psi_{\mathrm{KV}},\;
+\Psi_{\mathrm{TP\mbox{-}comm}},\;
+\Psi_{\mathrm{EP\mbox{-}comm}},\;
+\chi_{\mathrm{comp}},\;
+\chi_{\mathrm{mem}},\;
+\chi_{\mathrm{link}},\;
+\log \mathrm{TP},\log \mathrm{DP},\log \mathrm{EP},\;
+\text{dtype/back-end indicators}
+\Bigr]^\top,
+\label{eq:feature_vector}
+\end{equation}
+where the final indicator features capture discrete stack choices such as
+KV dtype, attention backend, and compiler/runtime path. In practice, $d$ is
+kept small (tens, not hundreds), and feature groups are regularized jointly.
+
+% ------------------------------------------------------------
+\subsubsection{Hierarchical Coefficient Parameterization}
+\label{sec:hierarchical_param}
+
+We parameterize \emph{both} server-side step coefficients $\beta_e$ and
+(client-only) edge coefficients $\alpha_e$ using hierarchical feature maps.
+
+\paragraph{Server-side (engine) coefficients.}
+To enforce nonnegativity and obtain multiplicative scaling laws, we model
+\begin{equation}
+\log \beta_{k,e}
+=
+\gamma_k^\top x_e + u_{k,e},
+\qquad k\in\{0,1,2\},
+\label{eq:beta_feature_map}
+\end{equation}
+where $\gamma_k\in\mathbb{R}^d$ are global parameters shared across all
+environments and $u_{k,e}\in\mathbb{R}$ are environment-specific offsets.
+Equivalently, $\beta_{k,e}=\exp(\gamma_k^\top x_e + u_{k,e})$.
+The offsets $u_{k,e}$ implement \emph{recalibration}: for a given target
+environment, they can absorb systematic deviations caused by unmodeled
+implementation details without changing the global transfer structure.
+
+\paragraph{Client-side coefficients (client-only model).}
+Let $\alpha_e$ collect client-visible coefficients, e.g.,
+$\alpha_{0,e}$ for request-independent RTT/overheads,
+$\alpha_{\mathrm{in},e}$ for per-input-token serialization cost, and
+$\alpha_{\mathrm{out},e}$ for per-output-token deserialization cost.
+We use an analogous map:
+\begin{equation}
+\log \alpha_{\ell,e}
+=
+\eta_\ell^\top z_e + v_{\ell,e},
+\qquad \ell\in\{0,\mathrm{in},\mathrm{out},\ldots\},
+\label{eq:alpha_feature_map}
+\end{equation}
+where $z_e$ contains network-path and client-stack features (region pair, protocol,
+payload compression, etc.), $\eta_\ell$ are global parameters, and $v_{\ell,e}$
+are environment offsets.
+
+\paragraph{Interpretation (priors and partial pooling).}
+For a new environment $e$ with limited calibration data, the feature maps
+$\exp(\gamma_k^\top x_e)$ and $\exp(\eta_\ell^\top z_e)$ provide informative
+\emph{priors}. As environment-specific evidence accumulates, offsets
+$u_{k,e}$ and $v_{\ell,e}$ deviate from zero to match the observed system.
+This enables fast bring-up (transfer) while retaining high-fidelity per-target
+calibration (recalibration).
+
+% ------------------------------------------------------------
+\subsubsection{Featureized M-step within EM / GEM}
+\label{sec:featureized_mstep}
+
+Crucially, the \emph{E-step remains unchanged}: all latent step allocation and
+boundary-aware densities in Sections~\ref{sec:em_idealized} and
+\ref{sec:em_continuous_kernelized} operate given the current coefficients.
+The only modification is in the M-step: rather than solving NNLS directly in
+$\beta$, we solve for global parameters and offsets.
+
+\paragraph{Trace-only setting.}
+At EM (or IRLS--GEM) iteration $m$, the E-step yields fixed features
+$\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ (tokens/step) for
+each phase instance $i$, along with step count $N_i$ and observed duration
+$\ell_i$. The predicted duration becomes
+\begin{equation}
+\widehat \ell_i(\gamma,u)
+=
+N_i\,\beta_{0,e(i)}(\gamma,u)
++
+\bigl[N_i\bar p^{\mathrm{pf},(m)}_i\bigr]\beta_{1,e(i)}(\gamma,u)
++
+\bigl[N_i\bar p^{\mathrm{dec},(m)}_i\bigr]\beta_{2,e(i)}(\gamma,u),
+\label{eq:featureized_predictor}
+\end{equation}
+with $\beta_{k,e}$ defined by Eq.~\eqref{eq:beta_feature_map}.
+The featureized M-step solves a regularized (optionally robust) problem:
+\begin{equation}
+(\gamma^{(m)},u^{(m)})
+=
+\arg\min_{\gamma,\{u_{e}\}}
+\sum_{i\in\mathcal{I}}
+\rho\!\left(\widehat \ell_i(\gamma,u)-\ell_i\right)
+\;+\;
+\lambda_\gamma\,\Omega(\gamma)
+\;+\;
+\sum_{k\in\{0,1,2\}}\lambda_{u,k}\sum_{e} u_{k,e}^2,
+\label{eq:featureized_objective}
+\end{equation}
+where $\rho$ is squared loss (EM) or Huber loss (IRLS--GEM), $\Omega$ is a
+group-aware regularizer (e.g., ridge or group-lasso) on $\gamma$, and the
+quadratic penalties on $u_{k,e}$ implement partial pooling.
+
+\paragraph{Client-only setting.}
+The same structure applies when phases are not observed and the objective is
+defined over client-visible response times (Section~\emph{TBD: client-only}).
+The step-level E-step is replaced by client-side latent decomposition (or by a
+combined latent allocation over stages), while the hierarchical maps
+Eqs.~\eqref{eq:beta_feature_map}--\eqref{eq:alpha_feature_map} remain unchanged.
+In both cases, the feature maps define informative priors and enable quick
+recalibration by fitting only offsets.
+
+\paragraph{Optimization notes.}
+Problem~\eqref{eq:featureized_objective} is smooth in $(\gamma,u)$ under squared
+or Huber loss and can be solved by standard convex or quasi-convex routines in
+small dimension.\footnote{Although the map $\beta=\exp(\cdot)$ introduces
+nonlinearity, the optimization is low-dimensional and well-conditioned under
+appropriate regularization. In practice, we use a stable second-order method
+(e.g., L-BFGS) and warm-start from the per-environment NNLS solutions.}
+If strict convexity is desired, one may replace $\exp(\cdot)$ with a softplus
+and include a small $\ell_2$ penalty on $\gamma$.
+
+% ------------------------------------------------------------
+\subsubsection{Recalibration Protocol and Generalization Scope}
+\label{sec:recalibration_protocol}
+
+We emphasize two distinct notions of generalization:
+
+\paragraph{(i) Workload and configuration generalization.}
+For a \emph{fixed} environment $e$ (fixed model, hardware, topology, and stack),
+once coefficients are calibrated (trace-only or client-only), BLIS generalizes
+across:
+arrival processes, input/output length distributions, prefix-cache hit rates,
+and vLLM settings (chunk size, batching limits, etc.), because these factors
+enter the simulator through workload traces and scheduling dynamics rather than
+through refitting coefficients.
+
+\paragraph{(ii) Cross-environment transfer (featureized BLIS).}
+Across environments, $\gamma$ provides a global prior that supports:
+\emph{sample-efficient calibration} and controlled \emph{interpolation} to new
+$(\text{model},\text{GPU},\text{topology})$ settings. Environment offsets $u_e$
+provide \emph{recalibration}: they preserve high-fidelity predictions for a
+target deployment while enabling rapid bring-up.
+
+\paragraph{Recommended workflow.}
+We recommend the following protocol:
+\begin{enumerate}
+\item \textbf{Global pretraining:} Fit $(\gamma,\eta)$ and offsets on a diverse
+set of environments (multiple model families, GPU types, and interconnects).
+\item \textbf{Target bring-up:} For a new environment $e^\star$, initialize
+$\beta_{e^\star}$ and $\alpha_{e^\star}$ from the priors
+$\exp(\gamma^\top x_{e^\star})$, $\exp(\eta^\top z_{e^\star})$.
+\item \textbf{Fast recalibration:} Fit only offsets $u_{e^\star}$ (and $v_{e^\star}$
+for client-only) using a small calibration workload, holding $(\gamma,\eta)$
+fixed. This yields a robust, per-target calibrated simulator.
+\item \textbf{Zero-shot workload generalization:} Evaluate new workloads and vLLM
+settings without retraining, using the calibrated coefficients.
+\end{enumerate}
+
+\paragraph{Why this matters.}
+This featureized formulation reconciles two competing goals:
+(1) \emph{portability} across heterogeneous fleets via feature-based priors, and
+(2) \emph{decision-equivalent fidelity} for a specific deployment via
+recalibration. Importantly, the latent-step allocation machinery and partial-chunk
+invariants of BLIS remain unchanged; featureization modifies only the coefficient
+parameterization and introduces a statistically principled sharing mechanism.
+
+% ------------------------------------------------------------
+\subsubsection{Theoretical Guarantee (Regularized GEM View)}
+\label{sec:featureized_theory}
+
+The featureized procedure is a special case of a regularized generalized EM
+(GEM) update: the E-step computes expected sufficient statistics (phase-averaged
+pressures or their client-only analogues), and the M-step decreases a
+regularized objective in $(\gamma,u)$.
+
+\begin{proposition}[Well-posedness and Descent under Regularized GEM]
+\label{prop:featureized_gem_descent}
+Assume the step-rate is clamped so that $\Delta^{(m)}(t)\ge \Delta_{\min}>0$
+(Section~\ref{sec:em_continuous_kernelized}), and the regularizer
+$\Omega(\gamma)$ is proper, lower semi-continuous, and coercive
+(e.g., $\Omega(\gamma)=\|\gamma\|_2^2$).
+If the M-step returns $(\gamma^{(m)},u^{(m)})$ such that the regularized objective
+in Eq.~\eqref{eq:featureized_objective} does not increase (exact minimization or
+sufficient decrease), then the regularized GEM objective is non-increasing across
+iterations, and every accumulation point of the iterates is a stationary point of
+the regularized refit.
+\end{proposition}
+
+\begin{proof}[Sketch]
+Given clamped $\Delta^{(m)}(t)$, the E-step densities are well-defined and the
+iteration-$m$ sufficient statistics are finite.
+With fixed E-step features, the M-step objective is a regularized smooth
+minimization in $(\gamma,u)$; coercivity ensures existence of minimizers and
+boundedness of the iterates. The GEM descent property and standard convergence
+arguments imply that accumulation points satisfy first-order stationarity for
+the regularized refit.
+\end{proof}
+
+\paragraph{Takeaway.}
+Featureized BLIS preserves the stability and robustness properties of the
+underlying EM / IRLS--GEM estimators while adding a principled transfer layer.
+In experiments, we use this structure to (i) provide strong priors on new
+model/GPU/topology combinations, and (ii) enable rapid recalibration for a target
+LLM, after which BLIS generalizes across workload families and serving settings
+without retraining.
 
 \bibliographystyle{plain}
 \bibliography{blis}
