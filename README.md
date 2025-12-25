@@ -1,11 +1,8 @@
 # BLIS: Trace-Only Step-Level Calibration for LLM Inference
 
-This repository accompanies the paper describing **BLIS**, a trace-only method
-for estimating step-level execution coefficients for vLLM-style inference engines.
+This repository accompanies the paper describing **BLIS**, a collection of trace-only methods for estimating step-level execution coefficients for vLLM-style inference engines.
 
-The core idea is to infer per-step execution costs using only production traces
-(phase start/end times and token counts), without engine instrumentation or
-per-step timing.
+The core idea is to infer per-step execution costs using only production traces (phase start/end times and token counts), without engine instrumentation or per-step timing.
 
 ---
 
