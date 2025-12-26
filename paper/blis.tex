@@ -370,6 +370,20 @@ Formally, the problem is:
 \section{Continuous EM for Execution Coefficients}
 \label{sec:featurized_continuous_em}
 
+\subsection{Algorithmic intuition}
+\label{subsec:algorithm_intuition}
+
+At a high level, Continuous EM alternates between two questions.
+First: given current estimates of execution speed, where in time would the
+engine’s busy-loop steps most plausibly have occurred within each observed
+phase window?
+Second: given that implied placement of steps, what execution speeds best
+explain the observed phase durations?
+The algorithm iterates between these two steps, progressively refining both
+the inferred step allocation and the execution coefficients until they are
+mutually consistent.
+
+
 \subsection{Trace pressures}
 \label{subsec:trace_pressures}
 
