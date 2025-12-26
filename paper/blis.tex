@@ -83,17 +83,6 @@
 
 \maketitle
 
-\begin{abstract}
-This paper introduces BLIS, a system for blackbox inference performance estimation 
-designed to model inference request flows and latency.
-\end{abstract}
-
-\section{Introduction}
-\label{sec:introduction}
-
-\section{Related Work}
-\label{sec:related-work}
-
 % ============================================================
 \subsection{vLLM Execution Model (Serving Semantics)}
 \label{subsec:vllm-overview}
@@ -150,18 +139,6 @@ engines:
 These invariants induce a natural \emph{step-level execution model}, which
 serves as the foundation for the latency model and coefficient estimation
 procedures developed in the remainder of the paper.
-
-% ============================================================
-\subsection{Design of BLIS}
-\label{subsec:blis-design}
-
-BLIS is a trace-driven inference simulator designed to reproduce the latency and
-throughput behavior of vLLM-style engines without requiring intrusive
-instrumentation or access to internal execution traces.
-It operates in two phases:
-(i) learning step-level execution coefficients from production traces, and
-(ii) replaying request arrivals and engine dynamics using these learned
-coefficients.
 
 % ============================================================
 \section{Latency Model}
@@ -252,538 +229,127 @@ All other stages are treated as additive, request-local delays and are not
 modeled at step granularity.
 
 
-\section{Trace-Only Estimation of Step-Level Execution Coefficients}
-\label{sec:step_beta_estimation}
-
-This section develops a trace-only methodology for estimating the
-\emph{step-level} execution coefficients of a vLLM-style inference engine.
-Our goal is to recover the coefficient vector
-$\beta=(\beta_0,\beta_1,\beta_2)$ in a step-time model that is used by the
-simulator, using only production traces that report phase start/end times and
-aggregate token counts.
-No step boundaries, per-step timings, or engine instrumentation are assumed.
-
-We present two estimators.
-Section~\ref{sec:baseline} introduces a simple, trace-only baseline that fits
-phase durations using time-integrated workload signals.
-Section~\ref{sec:em_estimation} then refines this baseline by making the
-\emph{latent placement of steps in wall-clock time} explicit and estimating it
-via an EM procedure with exact handling of the final partial prefill chunk.
-The baseline can be interpreted as a one-shot instance of the same latent-step
-allocation view, with a phase-local uniform allocation surrogate; EM replaces
-this surrogate by an iteration-dependent allocation driven by a learned
-step-density model.
-
-\paragraph{Notation and units (summary).}
-Table~\ref{tab:notation_summary} lists the principal symbols used in the baseline
-and EM estimators and their units.
-
-\begin{table}[ht!]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Symbol} & \textbf{Units} & \textbf{Meaning} \\
-\midrule
-$k$ & index & busy-loop iteration (latent execution step) \\
-$r$ & index & inference request; each has one prefill phase and one decode phase \\
-$i$ & index & a phase instance (prefill or decode) of a specific request \\
-$j$ & index & index of a trace-induced time-grid cell $[g_j,g_{j+1})$ \\
-$m$ & index & EM iteration index \\[0.5ex]
-
-$t_{i,s},\,t_{i,e}$ & seconds & start and end times of phase instance $i$ \\
-$\ell_i$ & seconds & observed duration of phase instance $i$ ($\ell_i=t_{i,e}-t_{i,s}$) \\
-$\tau_i$ & categorical & phase type of instance $i$ (\textsf{prefill} or \textsf{decode}) \\
-$N_i$ & steps & trace-inferred step count for phase instance $i$ (fixed) \\[0.5ex]
-
-$C$ & tokens/step & prefill chunk size \\
-$P_r$ & tokens & total (uncached) prefill tokens for request $r$ \\
-$D_r$ & tokens & total decode tokens for request $r$ \\
-$\rho_r$ & tokens & tokens in the final prefill step of request $r$, Eq.~\eqref{eq:rho_def} \\
-$\mu_r$ & tokens & missing token mass in final prefill step ($\mu_r=C-\rho_r$) \\[0.5ex]
-
-$a_r(t)$ & unitless & indicator that request $r$ is in prefill at time $t$ (trace-visible) \\
-$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ & tokens/step & naive full-chunk prefill pressure $C\sum_r a_r(t)$ \\
-$p^{\mathrm{dec}}(t)$ & tokens/step & decode pressure from overlapping decode phases \\[0.5ex]
-
-$\widehat\lambda_i$ & steps/sec & baseline phase-local step-density proxy $N_i/\ell_i$, Eq.~\eqref{eq:baseline_lambda_hat} \\
-$c(t)$ & tokens/sec & baseline partial-chunk correction signal (none/uniform/end) \\[0.5ex]
-
-$A_i^{\mathrm{pf}}$ & tokens & baseline prefill exposure (feature), Eq.~\eqref{eq:baseline_integrated_exposures_pf} \\
-$A_i^{\mathrm{dec}}$ & tokens & baseline decode exposure (feature), Eq.~\eqref{eq:baseline_integrated_exposures_dec} \\[0.5ex]
-
-$g_1<\cdots<g_{J+1}$ & seconds & trace-induced grid boundaries; cells are $[g_j,g_{j+1})$ \\
-$\mathcal{J}(i)$ & set & grid cells fully contained in phase window of $i$ (EM) \\[0.5ex]
-
-$Z_{ij}$ & steps & latent number of steps of phase $i$ executed in grid cell $j$ (EM) \\
-$\pi^{(m)}_{ij}$ & unitless & EM allocation weight of phase $i$ to cell $j$ at iter.~$m$, Eq.~\eqref{eq:idealized_pi} \\
-$\Delta^{(m)}_j$ & sec/step & EM cell-level step-time proxy at iter.~$m$, Eq.~\eqref{eq:idealized_step_rate} \\
-$\lambda^{(m)}_j$ & steps/sec & EM cell-level step density $1/\Delta^{(m)}_j$, Eq.~\eqref{eq:idealized_step_rate} \\
-$\tilde p^{\mathrm{pf},(m)}_j$ & tokens/step & EM effective prefill pressure on cell $j$ at iter.~$m$ \\[0.5ex]
-
-$\beta_0$ & sec/step & fixed per-step overhead coefficient \\
-$\beta_1,\beta_2$ & sec/token & per-token execution costs (prefill / decode) \\
-$\beta^{(m)}$ & mixed & coefficient vector at EM iteration $m$ \\
-\bottomrule
-\end{tabular}
-\caption{Notation and units used in trace-only step-level coefficient estimation (baseline and EM).}
-\label{tab:notation_summary}
-\end{table}
-
-
 % ============================================================
-\subsection{Problem Setup and Step-Level Model}
-\label{sec:problem_setup}
+\section{Featurized Baseline Estimation from Trace and Client Observations}
+\label{sec:featurized_baseline}
 
-We consider a vLLM-style inference engine that advances execution through a
-single logical busy-loop.
-Each busy-loop iteration (a \emph{step}) executes one forward-pass cycle that
-may process prefill tokens, decode tokens, or both, for a set of concurrently
-active requests.
-Steps are assumed to execute sequentially.
+This section unifies (i) trace-only estimation of step-level execution
+coefficients and (ii) Thus, execution and server-side queueing/interference 
+are absorbed into traces, while client-only overhead is learned 
+from residuals. The key outcome is a portable, environment-conditioned 
+latency model in which \emph{server execution} coefficients and 
+\emph{client-visible overhead} coefficients are learned via nonnegative 
+linear maps from environment features. Throughout, we assume 
+\emph{no per-step instrumentation}: traces do not expose busy-loop step 
+boundaries or per-step runtimes.
 
-Let $k$ index busy-loop steps.
-We model the duration of step $k$ as
+% ------------------------------------------------------------
+\subsection{Observability model: what we measure (and what we do not)}
+\label{subsec:observability_model}
+
+\paragraph{Environments.}
+Let $e\in\mathcal{E}$ index a deployment environment, defined by a fixed
+combination of: LLM (architecture/size), GPU type/interconnect, and engine
+configuration (e.g., chunk size, parallelism, scheduler settings).
+Each environment has nonnegative feature vectors
+\[
+x_e \in \mathbb{R}^{d_x}_{\ge 0},\qquad
+z_e \in \mathbb{R}^{d_z}_{\ge 0},
+\]
+where $x_e$ captures execution-relevant features (e.g., parameter count, hidden
+dimension, GPU FLOPs/bandwidth, interconnect characteristics, configuration
+flags), and $z_e$ captures client-visible overhead features (often similar, but
+allowed to differ; e.g., network topology).
+
+\paragraph{Trace-side observations.}
+In each environment $e$, we observe a collection of \emph{phase instances}
+$\mathcal{I}_e$ extracted from production traces.
+Each phase instance $i\in\mathcal{I}_e$ corresponds to either the \textsf{prefill}
+phase or the \textsf{decode} phase of a particular request, and provides:
+\begin{itemize}
+  \item request identifier $r_i$;
+  \item phase type $\tau_i\in\{\textsf{prefill},\textsf{decode}\}$;
+  \item phase start/end timestamps $(t_{i,s},t_{i,e})$ and duration
+        $\ell_i := t_{i,e}-t_{i,s}$;
+  \item request-level aggregate token totals associated with $r_i$:
+        prefill tokens $P_{r_i}$ and decode tokens $D_{r_i}$.
+\end{itemize}
+We assume $P_r$ counts only the \emph{uncached} prompt tokens that are actually
+executed during prefill (prefix-cached tokens are excluded).
+
+\paragraph{Client-side observations.}
+For a subset of requests (or for separate client experiments) in environment $e$,
+we observe per-request end-to-end latency $y_r$ and token lengths
+$\ell_r^{\mathrm{in}}$ (input tokens) and $\ell_r^{\mathrm{out}}$ (output tokens).
+Client-side $y_r$ includes networking, serialization, streaming, and all server
+effects (queueing + execution); it is not assumed to expose internal phase
+timestamps.
+
+\paragraph{Unobserved quantities.}
+Crucially, neither traces nor client data reveal:
+\begin{itemize}
+  \item busy-loop step boundaries;
+  \item per-step runtimes;
+  \item per-step token totals $(T_k^{\mathrm{pf}},T_k^{\mathrm{dec}})$.
+\end{itemize}
+The baseline estimator therefore operates by converting trace-visible
+phase overlaps into \emph{time-integrated workload exposures} suitable for
+regressing a step-level execution model.
+
+% ------------------------------------------------------------
+\subsection{Problem statement: featurized execution and client models}
+\label{subsec:problem_statement_featurized}
+
+\paragraph{Step-level execution model.}
+We model a vLLM-style engine as a single busy-loop that executes a sequence of
+discrete \emph{steps} (GPU forward passes), indexed by $k$.
+Step $k$ processes some number of prefill tokens $T_k^{\mathrm{pf}}$ and decode
+tokens $T_k^{\mathrm{dec}}$ across a dynamically constructed batch of active
+requests, and has duration
 \begin{equation}
 \Delta t_k
 =
-\beta_0
+\beta_{e,0}
 +
-\beta_1\,T^{\mathrm{pf}}_k
+\beta_{e,1}\,T_k^{\mathrm{pf}}
 +
-\beta_2\,T^{\mathrm{dec}}_k,
-\label{eq:step_model}
+\beta_{e,2}\,T_k^{\mathrm{dec}},
+\label{eq:featurized_step_model}
 \end{equation}
-where $\beta_0\ge 0$ is a fixed per-step overhead (seconds/step),
-$\beta_1,\beta_2\ge 0$ are per-token costs (seconds/token), and
-$T^{\mathrm{pf}}_k$ and $T^{\mathrm{dec}}_k$ are the total numbers of prefill and
-decode tokens processed in step $k$ across all requests.
-
-This affine step-time model is the fundamental abstraction used by our
-simulator. Accurate simulation therefore requires identifying $\beta$ from
-trace-only data.
-
-\paragraph{What traces provide.}
-Production inference traces do not expose step boundaries or per-step execution
-timings.
-Instead, they provide a collection of \emph{phase instances}, indexed by $i$,
-each corresponding to either the prefill phase or the decode phase of a single
-request.
-For each phase instance $i$, the trace provides:
-(i) the request id $r_i$,
-(ii) the phase type $\tau_i\in\{\textsf{prefill},\textsf{decode}\}$,
-(iii) start and end times $(t_{i,s},t_{i,e})$ and duration
-$\ell_i=t_{i,e}-t_{i,s}$, and
-(iv) aggregate token counts for that request, including total prefill tokens
-$P_{r_i}$ and total decode tokens $D_{r_i}$.
-Since each phase instance uniquely identifies its request, we write $P_r$ and
-$D_r$ without ambiguity.
-
-From these fields, we derive a trace-inferred step count $N_i\in\mathbb{N}$ for
-each phase instance.
-For a decode phase, execution proceeds one token per step, so $N_i=D_r$.
-For a prefill phase, execution is chunked: under prefill chunk size $C$, a
-standard trace-inferred choice is
-$N_i=\lceil P_r/C\rceil$.\footnote{
-Prefix-cached tokens do not contribute to execution steps and are therefore
-excluded from $P_r$. This treatment is consistent with the execution semantics
-of vLLM-style inference engines.
-} For a prefill phase instance $i$ of request $r_i$, we will also write
-$N_{r_i}$ for the inferred number of prefill steps, so $N_i=N_{r_i}$ for prefill
-instances.
-
-
-\paragraph{Latent step allocation viewpoint (common to baseline and EM).}
-The central obstacle in trace-only estimation is that, although each phase
-instance $i$ has a known total step count $N_i$, the trace does not reveal
-\emph{when within} $[t_{i,s},t_{i,e})$ those $N_i$ steps occurred, nor how the
-per-step token totals $(T^{\mathrm{pf}}_k,T^{\mathrm{dec}}_k)$ varied across
-time.
-Both the baseline and EM estimators operate by constructing
-\emph{trace-only attribution models} that allocate this latent step exposure
-over wall-clock time using only trace-visible phase boundaries.
-These attribution models are not claims about true step boundaries; they are
-used only through time integrals on a grid induced by the trace.
-
-
-% ============================================================
-\subsection{Trace-Derived Token Pressures}
-\label{sec:pressures}
-
-\paragraph{Intuition.}
-Inference executes as a sequence of discrete steps, but traces provide only
-coarse phase-level summaries.
-The goal is not to reconstruct the hidden step schedule; rather, we seek
-step-level coefficients that explain how prefill and decode work contribute to
-elapsed time \emph{when aggregated over many steps}.
-We therefore represent step-level workload using \emph{token pressures}:
-trace-derived functions of wall-clock time that quantify, in units of
-tokens/step, how much prefill and decode work would be attributed to a
-representative busy-loop step executed at that time.
-These pressures depend only on phase overlap in wall-clock time and can be
-computed exactly from phase boundaries.
-Figure~\ref{fig:overlap_phases} illustrates the resulting overlap structure.
-
-\begin{figure}[ht!]
-  \centering
-  \includegraphics[width=\linewidth]{figs/overlap_phases.pdf}
-  \caption{\textbf{Phase overlap and inferred workload over wall-clock time.}
-Each horizontal bar represents a trace-visible prefill or decode phase of a
-request, while dashed vertical lines indicate wall-clock instants at which a
-step boundary may occur. Although traces expose only phase start/end times—not
-step boundaries—the degree of phase overlap determines how much work is executed
-per step when time is aggregated. The estimators below convert overlap in
-wall-clock time into token exposures consistent with the step-level model.}
-\label{fig:overlap_phases}
-\end{figure}
-
-\paragraph{Trace-induced time grid.}
-Let $\{[g_j,g_{j+1})\}_{j=1}^J$ denote the piecewise-constant time grid formed by
-the union of all trace phase boundaries.
-All pressures and correction signals introduced below are constant on each grid
-cell, and all estimation procedures use them only through integrals over phase
-windows.
-
-\paragraph{Terminology: instantaneous quantities and exposures.}
-We distinguish between \emph{instantaneous} quantities, defined as functions of
-wall-clock time $t$ on the trace-induced grid, and \emph{exposures}, which are
-obtained by integrating instantaneous quantities over a phase window and serve
-as regression features.
-Instantaneous \emph{pressures} quantify work performed per execution step
-(tokens/step).
-Here ``tokens/step'' means the number of tokens processed by a single busy-loop
-iteration.
-Exposures are phase-level scalars with units of tokens, obtained either by
-(i) converting time-integrated pressures using a step-density surrogate
-(baseline), or (ii) forming step-averaged pressures via a step-allocation model
-and aggregating over a fixed step count (EM).
-
-\paragraph{Instantaneous token pressures.}
-We define two trace-derived, piecewise-constant pressures (tokens/step).
-The decode pressure $p^{\mathrm{dec}}(t)$ is the total decode-token work that
-would be attributed to a representative busy-loop step executed at time $t$,
-given the set of requests whose trace-visible decode phases overlap $t$.
-Formally, let $d_r(t)\in\{0,1\}$ indicate whether request $r$ is in its
-\textsf{decode} phase at wall-clock time $t$.
-Since decode processes exactly one token per active decode request per step, we
-have the trace-derived decode pressure
-\begin{equation}
-p^{\mathrm{dec}}(t) = \sum_r d_r(t),
-\qquad \text{units: tokens/step}.
-\label{eq:decode_pressure_def}
-\end{equation}
-
-
-For prefill, we start from the \emph{naive full-chunk} pressure
-\begin{equation}
-p^{\mathrm{pf}}_{\mathrm{full}}(t)=C\sum_r a_r(t),
-\label{eq:pf_full_pressure}
-\end{equation}
-where $a_r(t)\in\{0,1\}$ indicates whether request $r$ is in its prefill phase at
-time $t$.
-This full-chunk pressure treats each active prefill request as contributing $C$
-tokens per step.
-Accounting for the final partial prefill chunk is handled separately:
-the baseline introduces a correction in \emph{exposure space} via a
-time-based signal $c(t)$, whereas EM incorporates the correction directly in
-\emph{step space} by modifying an iteration-dependent effective prefill pressure
-on the trace grid.
-
-
-\subsubsection{Prefill Chunking and Partial-Chunk Correction Signals}
-\label{sec:prefill_correction}
-
-Decode contributes exactly one token per active request per step.
-Prefill, however, proceeds in chunks of size $C$ tokens per step, except for the
-final prefill step of a request, which may process fewer than $C$ tokens.
-Naively treating all prefill steps as full chunks introduces systematic bias.
-
-For a request $r$ with $P_r$ prefill tokens and $N_r$ prefill steps, the final
-prefill step processes
-\begin{equation}
-\rho_r = P_r - C\,(N_r-1),
-\qquad \rho_r \in (0,C],
-\label{eq:rho_def}
-\end{equation}
-and the missing token mass relative to a full chunk is
+where environment-specific coefficients
 \[
-\mu_r = C - \rho_r \in [0,C).
+\beta_e=(\beta_{e,0},\beta_{e,1},\beta_{e,2})
 \]
+have units
+(sec/step, sec/token for prefill, sec/token for decode), respectively.
 
-\paragraph{No partial-chunk correction (baseline ablation).}
-The simplest baseline ignores partial chunks and uses
-$p^{\mathrm{pf}}_{\mathrm{full}}(t)$ as the effective prefill pressure. This
-serves as a natural ablation: it is fully trace-only and makes no assumptions
-about where the final prefill step occurs within a prefill interval.
-
-\paragraph{Uniform redistribution correction (implemented in integrated form).}
-A more refined baseline accounts for $\mu_r$ by redistributing it uniformly over
-the prefill interval of request $r$.
-Let $[t_{r,s},t_{r,e})$ denote the trace-visible prefill interval of request $r$.
-Define a per-request correction signal (tokens/second)
+\paragraph{Client overhead model.}
+Client-visible latency includes additional request-local overheads not visible
+in server traces (e.g., client--server networking, request/response
+serialization, streaming effects).
+We model these overheads as
 \begin{equation}
-c_r^{\mathrm{uni}}(t)
+L^{\mathrm{client}}_{r,e}
 =
-\frac{\mu_r}{t_{r,e}-t_{r,s}}\,
-\mathbf{1}\{t\in[t_{r,s},t_{r,e})\},
-\qquad
-\text{units: tokens/second},
-\label{eq:uniform_corr_signal}
-\end{equation}
-and the aggregate correction signal
-\begin{equation}
-c^{\mathrm{uni}}(t)=\sum_r c_r^{\mathrm{uni}}(t).
-\label{eq:uniform_corr_signal_sum}
-\end{equation}
-By construction,
-$\int_{t_{r,s}}^{t_{r,e}} c_r^{\mathrm{uni}}(t)\,dt=\mu_r$, so total missing mass
-is preserved exactly when integrating over time.
-
-\paragraph{End-localized correction (implemented on the trace grid).}
-Uniform redistribution implicitly treats the final prefill step as equally
-likely to occur anywhere within the prefill interval.
-An alternative trace-only assumption is that the final prefill step completes
-near the trace-visible end time $t_{r,e}$.
-Let $j(r)$ be the index of the unique trace-grid cell containing $t_{r,e}$ under
-the half-open convention (with boundary clamping at the end).
-Define the per-request end-localized correction signal (tokens/second)
-\begin{equation}
-c_r^{\mathrm{end}}(t)
-=
-\frac{\mu_r}{g_{j(r)+1}-g_{j(r)}}\,
-\mathbf{1}\{t\in[g_{j(r)},g_{j(r)+1})\},
-\qquad
-\text{units: tokens/second},
-\label{eq:end_corr_signal}
-\end{equation}
-and the aggregate correction signal
-\begin{equation}
-c^{\mathrm{end}}(t)=\sum_r c_r^{\mathrm{end}}(t).
-\label{eq:end_corr_signal_sum}
-\end{equation}
-Again, $\int c_r^{\mathrm{end}}(t)\,dt=\mu_r$ by construction.
-
-\paragraph{Remark (why correction signals appear in the baseline).}
-In the baseline, pressures are represented in units of tokens/step and enter the
-estimator only through time integrals that are converted into token totals using
-a phase-local step-density proxy (Section~\ref{sec:baseline}).
-The partial-chunk adjustment is therefore represented as a \emph{time-based}
-signal $c(t)$ (tokens/sec): its time integral is already in tokens and can be
-subtracted in exposure space without introducing any step-boundary assumptions.
-
-\paragraph{Implementation note (no pointwise reconstruction required).}
-Although we define pressures and corrections as functions of wall-clock time, the
-estimators require only integrals over phase windows such as
-$\int_{t_{i,s}}^{t_{i,e}} p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt$ and
-$\int_{t_{i,s}}^{t_{i,e}} c(t)\,dt$.
-These can be computed exactly by sweeping the trace-induced time grid.
-
-\subsection{Baseline: Time-Integrated NNLS Estimation}
-\label{sec:baseline}
-
-We first present a simple, trace-only baseline estimator that fits phase
-durations using time-integrated pressures.
-Because pressures are expressed in \emph{tokens per step}, a time integral
-$\int p(t)\,dt$ has units $(\text{tokens}/\text{step})\cdot \text{seconds}$.
-To form regression features with units of \emph{tokens}---so that
-$\beta_1,\beta_2$ retain the interpretation ``seconds per token''---we
-convert time integrals into approximate \emph{step integrals} using a
-phase-local constant step density.
-
-\paragraph{Phase-local step density.}
-For phase instance $i$, let $T_i=t_{i,e}-t_{i,s}$ be its observed duration and
-let $N_i\in\mathbb{N}$ be the trace-inferred step count.
-We define the (phase-local) step density proxy
-\begin{equation}
-\widehat\lambda_i \;=\; \frac{N_i}{T_i},
-\qquad
-\text{units: steps/second}.
-\label{eq:baseline_lambda_hat}
-\end{equation}
-This assumes steps are spread approximately uniformly over the phase window,
-and is used \emph{only} to convert time integrals into step-aggregated token
-totals in the baseline.\footnote{Implementation detail: to avoid extreme $\widehat{\lambda}_i$ when $T_i$
-is very small, we may compute $\widehat{\lambda}_i = N_i/\max\{T_i, T_{\min}\}$ for a
-small $T_{\min}\ge 0$. The default $T_{\min}=0$ recovers Eq.~\eqref{eq:baseline_lambda_hat}.}
-
-
-\paragraph{Integrated token exposures (baseline features).}
-We define baseline integrated exposures
-\begin{align}
-A^{\mathrm{pf}}_i
-&=
-\int_{t_{i,s}}^{t_{i,e}}
-\tilde p^{\mathrm{pf}}(t)\,\widehat\lambda_i\,dt,
-&
-A^{\mathrm{dec}}_i
-&=
-\int_{t_{i,s}}^{t_{i,e}}
-p^{\mathrm{dec}}(t)\,\widehat\lambda_i\,dt,
-\label{eq:baseline_integrated_exposures}
-\end{align}
-which have units of tokens because $\tilde p^{\mathrm{pf}}(t)$ and
-$p^{\mathrm{dec}}(t)$ are in tokens/step and $\widehat\lambda_i$ is in
-steps/second.
-
-\paragraph{Baseline predictor.}
-The baseline predicts phase duration as
-\begin{equation}
-\widehat T_i(\beta)
-=
-\beta_0\,N_i
+\alpha_{e,0}
 +
-\beta_1\,A^{\mathrm{pf}}_i
+\alpha_{e,1}\,\ell^{\mathrm{in}}_r
 +
-\beta_2\,A^{\mathrm{dec}}_i,
-\label{eq:baseline_predictor}
+\alpha_{e,2}\,\ell^{\mathrm{out}}_r,
+\label{eq:client_overhead_model}
 \end{equation}
-where $\beta_0$ has units seconds/step and $\beta_1,\beta_2$ have units
-seconds/token, consistent with the step-level model in
-Eq.~\eqref{eq:step_model}.
+with environment-specific coefficients
+$\alpha_e=(\alpha_{e,0},\alpha_{e,1},\alpha_{e,2})$ (units: seconds, sec/token,
+sec/token).
 
-\paragraph{NNLS estimation.}
-Given a set of phase instances $\mathcal{I}$, we estimate $\beta$ via
-non-negative least squares:
-\begin{equation}
-\min_{\beta \in \mathbb{R}^3_{\ge 0}}
-\sum_{i\in\mathcal{I}}
-\left(
-\widehat T_i(\beta) - T_i
-\right)^2 .
-\label{eq:baseline_nnls}
-\end{equation}
-
-We emphasize that the simulator generates its own step-level token counts 
-and KV-cache dynamics; the only information learned from traces is the 
-estimated $\beta$, which parameterizes the simulator but does not 
-encode any trace-specific timing information.
-
-The pseudocode for the baseline estimation procedure is in 
-Algorithm \ref{alg:baseline}.
-
-\begin{algorithm}[t]
-\caption{Baseline algorithm for trace-only estimation}
-\label{alg:baseline}
-\begin{algorithmic}[1]
-\Require Instances $\{(\text{request id }r_i,\ \text{type }\tau_i\in\{\textsf{prefill},\textsf{decode}\},\ t_{i,s},t_{i,e},\ P_i,D_i)\}_{i=1}^n$, chunk size $C$.
-\Ensure $\hat\beta=(\hat\beta_0,\hat\beta_1,\hat\beta_2)\in\mathbb{R}^3_{\ge 0}$.
-\State \textbf{Infer step counts.} $N_i\gets \lceil P_i/C\rceil$ if $\tau_i=\textsf{prefill}$; else $N_i\gets D_i$.
-\State \textbf{Durations and step density.} $T_i\gets t_{i,e}-t_{i,s}$; $\widehat\lambda_i\gets N_i/T_i$.
-\State \textbf{Global time grid.} $\mathcal{G}=\{g_0<\dots<g_M\}\gets\mathrm{sort}\big(\{t_{i,s}\}_i\cup\{t_{i,e}\}_i\big)$; segments are $[g_j,g_{j+1})$.
-\State \textbf{Piecewise-constant signals on segments.} For each segment $j=0,\dots,M-1$:
-\[
-\begin{aligned}
-p^{\mathrm{pf}}_{\mathrm{full},j}
-&\gets C \cdot \bigl(\#\text{ requests prefilling during }[g_j,g_{j+1})\bigr),\\
-p^{\mathrm{dec}}_{j}
-&\gets \bigl(\#\text{ requests decoding during }[g_j,g_{j+1})\bigr).
-\end{aligned}
-\]
-\State \textbf{Prefill correction (uniform redistribution).}
-\For{each request $r$}
-  \State Let $i$ denote the (unique) \textsf{prefill} phase instance of request $r$.
-  \State Set missing mass $\mu_r \gets C N_i - P_i$ and uniform rate
-  $\nu_r \gets \mu_r/(t_{i,e}-t_{i,s})$ \quad (tokens/sec).
-\EndFor
-\State For each segment $[g_j,g_{j+1})$, set the aggregate correction rate (tokens/sec)
-\[
-\begin{aligned}
-u_j \;\;&\gets \sum_r \nu_r,
-\quad \text{where the sum is over all requests $r$ whose \textsf{prefill} interval overlaps with }[g_j,g_{j+1}) .
-\end{aligned}
-\]
-\For{each phase instance $i$}
-  \State Let $\mathcal{J}(i)$ be the set of grid segments $j$ whose interval
-  $[g_j,g_{j+1})$ overlaps the phase window $[t_{i,s},t_{i,e})$.
-  \State For each $j\in\mathcal{J}(i)$, let
-  $\Delta t_{ij} \gets \bigl|\,[t_{i,s},t_{i,e})\cap[g_j,g_{j+1})\,\bigr|$.
-  \State Compute exact segment sums:
-  \[
-  \begin{aligned}
-  J^{\mathrm{pf}}_i &\gets \sum_{j\in\mathcal{J}(i)} p^{\mathrm{pf}}_{\mathrm{full},j}\,\Delta t_{ij},\\
-  J^{\mathrm{dec}}_i &\gets \sum_{j\in\mathcal{J}(i)} p^{\mathrm{dec}}_{j}\,\Delta t_{ij},\\
-  U_i &\gets \sum_{j\in\mathcal{J}(i)} u_j\,\Delta t_{ij}.
-  \end{aligned}
-  \]
-  \State Convert to token exposures:
-  $A^{\mathrm{pf}}_i\gets \widehat\lambda_i J^{\mathrm{pf}}_i-U_i$,\;
-  $A^{\mathrm{dec}}_i\gets \widehat\lambda_i J^{\mathrm{dec}}_i$.
-\EndFor
-\State \textbf{NNLS fit.}
-$\hat\beta\gets\arg\min_{\beta\ge0}\sum_i(\beta_0N_i+\beta_1A^{\mathrm{pf}}_i+\beta_2A^{\mathrm{dec}}_i-T_i)^2$.
-\State \Return $\hat\beta$.
-\end{algorithmic}
-\end{algorithm}
-
-
-
-\paragraph{Limitation of the baseline.}
-This estimator remains wall-clock--weighted because $A_i^{\mathrm{pf}}$ and
-$A_i^{\mathrm{dec}}$ are formed by integrating over time within each phase,
-using the phase-average step density proxy $\widehat\lambda_i$ rather than a
-time-varying step density.
-As a result, phases that coincide with long-step periods can exert
-disproportionate influence, motivating the step-density--reweighted estimator
-in Section~\ref{sec:em_continuous_kernelized}.
-
-% ============================================================
-\section{Featurized Execution and Client Coefficients}
-\label{sec:featurized_coefficients}
-
-BLIS is designed to operate across a wide range of deployment settings,
-including different LLM architectures, GPU and interconnect backends, and
-serving-engine configurations.
-Re-estimating execution and client-overhead coefficients independently for
-every setting would be both costly and statistically inefficient.
-In this section, we introduce a \emph{featurized coefficient model} that enables
-systematic transfer across environments while preserving the simplicity and
-interpretability of the trace-decomposed baseline estimator.
-
-\paragraph{Key idea.}
-Rather than treating execution coefficients as environment-specific constants,
-we model them as nonnegative linear functions of \emph{positive environment
-features}.
-This allows BLIS to:
-(i) learn a single global model from heterogeneous trace and client data,
-(ii) generalize to unseen LLM/GPU/configuration combinations, and
-(iii) support lightweight recalibration when necessary.
-
-% ------------------------------------------------------------
-\subsection{Environments and positive features}
-
-Let $e\in\mathcal{E}$ index a deployment environment.
-An environment corresponds to a fixed combination of:
-LLM architecture and size, GPU type and interconnect topology, and inference
-engine configuration (e.g., chunk size, parallelism, scheduler settings).
-
-Each environment is described by a feature vector
-\[
-x_e \in \mathbb{R}^{d_x}_{\ge 0},
-\]
-whose entries are \emph{nonnegative} quantities such as:
-model parameter count, hidden dimension, KV-cache footprint, GPU FLOPs,
-memory bandwidth, interconnect bandwidth/latency, and configuration flags
-encoded as $0/1$.
-We explicitly include a constant intercept feature to represent baseline costs.
-
-For client-visible overheads (networking, serialization, streaming), we define
-an analogous nonnegative feature vector
-\[
-z_e \in \mathbb{R}^{d_z}_{\ge 0}.
-\]
-In many deployments $x_e$ and $z_e$ coincide, but we keep them distinct to allow
-client-side effects (e.g., network topology) to vary independently of GPU
-execution.
-
-% ------------------------------------------------------------
-\subsection{Featurized coefficient model}
-
-We parameterize execution and client coefficients as
+\paragraph{Featurized coefficient maps.}
+Rather than re-estimating $\beta_e$ and $\alpha_e$ independently for each
+environment, we learn nonnegative linear feature maps:
 \begin{equation}
 \beta_e = x_e^\top B,
 \qquad
 \alpha_e = z_e^\top A,
-\label{eq:featurized_linear_model}
+\label{eq:featurized_maps}
 \end{equation}
 where
 \[
@@ -791,105 +357,341 @@ B \in \mathbb{R}^{d_x \times 3}_{\ge 0},
 \qquad
 A \in \mathbb{R}^{d_z \times 3}_{\ge 0}.
 \]
+Nonnegativity of $(x_e,z_e,A,B)$ ensures physical interpretability and guarantees
+$\beta_e,\alpha_e\ge 0$ for all environments (including unseen ones).
 
-Here $\beta_e=(\beta_{e,0},\beta_{e,1},\beta_{e,2})$ are the step-level execution
-coefficients (sec/step, sec/token for prefill, sec/token for decode), and
-$\alpha_e=(\alpha_{e,0},\alpha_{e,1},\alpha_{e,2})$ are client-side overhead
-coefficients (seconds, sec/token for input, sec/token for output).
+\paragraph{Learning objective (baseline).}
+The baseline estimator constructs, from trace-side observables, phase-level
+regression features that approximate the \emph{step-aggregated} work experienced
+during each trace phase instance. These features allow learning $B$ from traces
+alone. Separately, we learn $A$ from client latencies after subtracting the
+trace-visible server-side component.
 
-Because features and matrices are nonnegative, Eq.~\eqref{eq:featurized_linear_model}
-guarantees $\beta_e,\alpha_e\ge 0$ for \emph{all} environments, including those
-not seen during training.
-This preserves physical interpretability and avoids the need for nonlinear link
-functions.
-
-\paragraph{Interpretation.}
-Each feature contributes additively and nonnegatively to each coefficient.
-This structure is intentionally simple: it matches how system resources
-contribute to execution cost and supports convex estimation at scale.
+Formally, the problem is:
+\begin{itemize}
+  \item \textbf{Trace-only:} estimate $B$ such that, for each phase instance
+  $i\in\mathcal{I}_e$, the observed duration $\ell_i$ is well-predicted by a
+  featurized version of the step model aggregated over the inferred step count.
+  \item \textbf{Client residual:} estimate $A$ such that client residual latency
+  (end-to-end minus trace-visible server latency) is well-predicted by the
+  linear overhead model in Eq.~\eqref{eq:client_overhead_model}.
+\end{itemize}
 
 % ------------------------------------------------------------
-\subsection{Learning execution maps from traces}
+\subsection{Featurized baseline estimator: definitions, features, and NNLS}
+\label{subsec:featurized_baseline_estimator}
 
-For each environment $e$, trace data provides phase instances
-$i\in\mathcal{I}_e$ with observed duration $T_i$, step count $N_i$, and integrated
-token exposures $(A_i^{\mathrm{pf}},A_i^{\mathrm{dec}})$ constructed exactly as in
-the trace-decomposed baseline (Eq~\eqref{eq:baseline_integrated_exposures}).
+This subsection defines (i) how we infer per-phase step counts from token totals,
+(ii) how we compute trace-derived token ``pressures'' and integrated exposures,
+and (iii) how we stack a global nonnegative least-squares (NNLS) problem to learn
+$B$ and $A$.
 
-Substituting $\beta_e=x_e^\top B$ into the trace predictor yields
+% -------------------------
+\subsubsection{Trace-inferred step counts and partial prefill chunking}
+\label{subsubsec:featurized_step_counts}
+
+\paragraph{Prefill and decode step counts.}
+For each request $r$ in environment $e$, let $P_r$ be its uncached prefill token
+count and $D_r$ be its decode token count.
+Let $C$ denote the engine's prefill chunk size (tokens/step) for environment $e$.
+We infer:
+\begin{itemize}
+  \item \textbf{Decode:} decode advances at most one token per step per active
+  request; hence a decode phase instance has inferred step count
+  \(
+    N_i = D_{r_i}
+  \)
+  when $\tau_i=\textsf{decode}$.
+  \item \textbf{Prefill:} prefill proceeds in chunks of up to $C$ tokens/step,
+  with the final step possibly partial; hence a prefill phase instance of request
+  $r$ has inferred step count
+  \begin{equation}
+  N_r^{\mathrm{pf}} = \left\lceil \frac{P_r}{C} \right\rceil,
+  \qquad
+  N_i = N_{r_i}^{\mathrm{pf}}
+  \ \ \text{when }\tau_i=\textsf{prefill}.
+  \label{eq:prefill_step_count}
+  \end{equation}
+\end{itemize}
+
+\paragraph{Final partial prefill chunk.}
+For a request $r$ with $N_r^{\mathrm{pf}}$ prefill steps, the last prefill step
+processes
+\begin{equation}
+\rho_r
+=
+P_r - C\,(N_r^{\mathrm{pf}}-1),
+\qquad
+\rho_r\in(0,C],
+\label{eq:rho_def_featurized}
+\end{equation}
+so the \emph{missing mass} relative to a full chunk is
+\begin{equation}
+\mu_r = C - \rho_r \in [0,C).
+\label{eq:mu_def_featurized}
+\end{equation}
+Ignoring $\mu_r$ systematically overstates prefill token work. The baseline
+handles this via a trace-only correction in \emph{exposure space}
+(Section~\ref{subsubsec:pressures_exposures}).
+
+% -------------------------
+\subsubsection{Trace-derived pressures and integrated token exposures}
+\label{subsubsec:pressures_exposures}
+
+\paragraph{Trace-induced time grid.}
+Let $\mathcal{G}=\{g_1<g_2<\cdots<g_{J+1}\}$ be the sorted set of all phase
+boundaries $\{t_{i,s}\}\cup\{t_{i,e}\}$ within environment $e$.
+This partitions time into half-open grid cells $[g_j,g_{j+1})$, on which phase
+membership is constant.
+
+\paragraph{Instantaneous phase indicators.}
+Define binary indicators at wall-clock time $t$:
 \[
-T_i
-\approx
+a_r(t)=\mathbf{1}\{r \text{ is in prefill at }t\},
+\qquad
+d_r(t)=\mathbf{1}\{r \text{ is in decode at }t\}.
+\]
+These are trace-visible because prefill/decode phase windows are observed.
+
+\paragraph{Token pressures (units: tokens/step).}
+We define piecewise-constant \emph{pressures} that quantify how many tokens would
+be attributed to a representative step executed at time $t$:
+\begin{align}
+p^{\mathrm{dec}}(t)
+&:= \sum_r d_r(t),
+&&\text{(decode: 1 token per active decode request per step)}
+\label{eq:pressure_decode_featurized}
+\\
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+&:= C\sum_r a_r(t).
+&&\text{(prefill: full-chunk assumption)}
+\label{eq:pressure_prefill_full_featurized}
+\end{align}
+The baseline starts from $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and subtracts a
+trace-only correction for partial chunks.
+
+\paragraph{Prefill partial-chunk correction signal (units: tokens/sec).}
+We use a trace-only \emph{uniform redistribution} correction that preserves
+missing token mass exactly in time integrals.
+Let $[t^{\mathrm{pf}}_{r,s},t^{\mathrm{pf}}_{r,e})$ denote request $r$'s observed
+prefill interval (from its prefill phase instance). Define
+\begin{equation}
+c_r(t)
+=
+\frac{\mu_r}{t^{\mathrm{pf}}_{r,e}-t^{\mathrm{pf}}_{r,s}}
+\,
+\mathbf{1}\{t\in[t^{\mathrm{pf}}_{r,s},t^{\mathrm{pf}}_{r,e})\},
+\qquad
+c(t)=\sum_r c_r(t),
+\label{eq:prefill_correction_uniform_featurized}
+\end{equation}
+so $\int c_r(t)\,dt=\mu_r$ and $\int c(t)\,dt=\sum_r \mu_r$.
+
+\paragraph{Phase-local step density proxy (units: steps/sec).}
+For each phase instance $i$ with inferred step count $N_i$ and observed duration
+$\ell_i=t_{i,e}-t_{i,s}$, define
+\begin{equation}
+\widehat\lambda_i := \frac{N_i}{\ell_i}.
+\label{eq:lambda_hat_featurized}
+\end{equation}
+This proxy is used \emph{only} to convert time-integrated pressures
+(tokens/step $\times$ sec) into token totals (tokens) for regression features.
+
+\paragraph{Integrated exposures (units: tokens).}
+For each phase instance $i$, define its baseline token exposures
+\begin{align}
+A^{\mathrm{pf}}_i
+&:=
+\widehat\lambda_i
+\int_{t_{i,s}}^{t_{i,e}}
+p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt
+\;-\;
+\int_{t_{i,s}}^{t_{i,e}}
+c(t)\,dt,
+\label{eq:Apf_def_featurized}
+\\
+A^{\mathrm{dec}}_i
+&:=
+\widehat\lambda_i
+\int_{t_{i,s}}^{t_{i,e}}
+p^{\mathrm{dec}}(t)\,dt.
+\label{eq:Adec_def_featurized}
+\end{align}
+The subtraction in Eq.~\eqref{eq:Apf_def_featurized} corrects the overcount from
+treating all prefill steps as full chunks: time-integrating $c(t)$ yields the
+exact missing token mass attributed (uniformly) to the phase window, without
+introducing any step-boundary assumptions.
+
+\paragraph{Implementation (grid-exact integrals).}
+All integrals above are computed exactly on the trace-induced grid:
+for any piecewise-constant signal $s(t)$,
+\[
+\int_{t_{i,s}}^{t_{i,e}} s(t)\,dt
+=
+\sum_{j=1}^J s_j \cdot \bigl|\,[t_{i,s},t_{i,e})\cap[g_j,g_{j+1})\,\bigr|,
+\]
+where $s_j$ is the constant value of $s(t)$ on cell $[g_j,g_{j+1})$.
+
+% -------------------------
+\subsubsection{Featurized predictors and global NNLS for $B$ (trace-only)}
+\label{subsubsec:nnls_B_trace_only}
+
+\paragraph{Phase-level predictor in environment $e$.}
+For phase instance $i\in\mathcal{I}_e$, the baseline predicts its duration as
+\begin{equation}
+\widehat \ell_i(B)
+=
+N_i\,\beta_{e,0}
++
+A_i^{\mathrm{pf}}\,\beta_{e,1}
++
+A_i^{\mathrm{dec}}\,\beta_{e,2},
+\qquad
+\beta_e = x_e^\top B.
+\label{eq:featurized_baseline_phase_predictor}
+\end{equation}
+This preserves the semantics of the step model:
+$N_i$ counts steps, while $(A_i^{\mathrm{pf}},A_i^{\mathrm{dec}})$ approximate
+step-aggregated token totals experienced during the phase.
+
+\paragraph{Linearization in $\mathrm{vec}(B)$.}
+Let $b_0,b_1,b_2\in\mathbb{R}^{d_x}_{\ge 0}$ denote the columns of $B$.
+Then Eq.~\eqref{eq:featurized_baseline_phase_predictor} becomes
+\[
+\widehat \ell_i(B)
+=
 N_i(x_e^\top b_0)
 +
 A_i^{\mathrm{pf}}(x_e^\top b_1)
 +
 A_i^{\mathrm{dec}}(x_e^\top b_2),
 \]
-which is linear in the unknown entries of $B$.
-Defining the per-instance feature row
-\[
-\phi_i :=
+which is linear in the entries of $B$.
+Define the per-instance row (dimension $1\times 3d_x$)
+\begin{equation}
+\phi_i
+:=
 \big[
 N_i x_e^\top,\;
 A_i^{\mathrm{pf}} x_e^\top,\;
 A_i^{\mathrm{dec}} x_e^\top
 \big],
-\]
-we stack all trace instances across environments and estimate $B$ via a single
-global nonnegative least-squares problem:
-\begin{equation}
-\min_{\mathrm{vec}(B)\ge 0}
-\left\|
-\Phi_{\mathrm{trace}}\,\mathrm{vec}(B) - T
-\right\|_2^2.
-\label{eq:nnls_B_featurized}
+\label{eq:phi_row_def}
 \end{equation}
+and let $\theta := \mathrm{vec}(B)$ stack the columns of $B$.
+Then $\widehat \ell_i(B)=\phi_i \theta$.
 
-\paragraph{Why this works.}
-Trace-observed phase durations already include admission delay, batching delay,
-and GPU contention.
-As a result, $B$ is learned directly from server-visible execution behavior,
-without requiring any explicit queueing model.
+\paragraph{Global trace NNLS for $B$.}
+Stacking all phase instances across environments, we solve:
+\begin{equation}
+\widehat B
+=
+\arg\min_{B\in\mathbb{R}^{d_x\times 3}_{\ge 0}}
+\sum_{e\in\mathcal{E}}
+\sum_{i\in\mathcal{I}_e}
+\left(
+\widehat \ell_i(B) - \ell_i
+\right)^2.
+\label{eq:global_nnls_B}
+\end{equation}
+This is a convex NNLS problem in $\theta=\mathrm{vec}(B)$.
 
-% ------------------------------------------------------------
-\subsection{Learning client coefficients from trace-decomposed residuals}
+\paragraph{Interpretation.}
+Because $\ell_i$ includes admission delay, batching delay, contention, and
+execution within the server, $\widehat B$ is learned directly from
+\emph{server-visible} behavior using traces only, without requiring a separate
+queueing model.
 
-For environments with paired client measurements, each request $r$ provides
-end-to-end latency $y_r$ and trace-observed server-side latency
-$S_r^{\mathrm{trace}}$.
-We form the residual
+% -------------------------
+\subsubsection{Learning $A$ from client residuals (decoupled from execution)}
+\label{subsubsec:nnls_A_client}
+
+\paragraph{Trace-visible server latency per request.}
+For a request $r$ in environment $e$, traces provide its prefill phase duration
+$\ell^{\mathrm{pf}}_r$ and (if applicable) decode phase duration
+$\ell^{\mathrm{dec}}_r$. Define the trace-visible server-side latency
+\begin{equation}
+S^{\mathrm{trace}}_{r,e}
+:=
+\ell^{\mathrm{pf}}_r + \ell^{\mathrm{dec}}_r,
+\label{eq:server_trace_latency_def}
+\end{equation}
+where $\ell^{\mathrm{dec}}_r:=0$ for prefill-only requests.
+
+\paragraph{Client residual.}
+For requests where we observe end-to-end client latency $y_r$, define
+\begin{equation}
+R_{r,e} := y_r - S^{\mathrm{trace}}_{r,e}.
+\label{eq:client_residual_def}
+\end{equation}
+By construction, $R_{r,e}$ isolates client-visible effects not captured by
+server traces (networking, serialization, streaming).
+
+\paragraph{Featurized client model and NNLS for $A$.}
+Substituting $\alpha_e=z_e^\top A$ into Eq.~\eqref{eq:client_overhead_model}
+yields
 \[
-R_r := y_r - S_r^{\mathrm{trace}},
+R_{r,e}
+\approx
+(z_e^\top a_0)
++
+\ell_r^{\mathrm{in}}(z_e^\top a_1)
++
+\ell_r^{\mathrm{out}}(z_e^\top a_2),
 \]
-which isolates client-visible effects not seen by the server.
-
-Substituting $\alpha_e=z_e^\top A$ into the client model yields a linear regression
-in $A$.
-Defining
+where $a_0,a_1,a_2$ are columns of $A$.
+Define the per-request row
 \[
-\psi_r :=
+\psi_r
+:=
 \big[
 1\cdot z_e^\top,\;
 \ell_r^{\mathrm{in}} z_e^\top,\;
 \ell_r^{\mathrm{out}} z_e^\top
 \big],
 \]
-we estimate $A$ via global NNLS:
+and stack across all observed client requests to solve the global NNLS:
 \begin{equation}
-\min_{\mathrm{vec}(A)\ge 0}
-\left\|
-\Psi_{\mathrm{client}}\,\mathrm{vec}(A) - R
-\right\|_2^2.
-\label{eq:nnls_A_featurized}
+\widehat A
+=
+\arg\min_{A\in\mathbb{R}^{d_z\times 3}_{\ge 0}}
+\sum_{(r,e)\in\mathcal{D}_{\mathrm{client}}}
+\left(
+\psi_r\,\mathrm{vec}(A) - R_{r,e}
+\right)^2.
+\label{eq:global_nnls_A}
 \end{equation}
 
 \paragraph{Separation of concerns.}
-This decomposition cleanly separates estimation:
-execution coefficients $B$ are learned solely from traces, while client
-coefficients $A$ are learned solely from residuals after subtracting trace-visible
-server latency.
-Neither estimation step is contaminated by the other.
+The estimation of $B$ uses \emph{only} trace instances and is unaffected by
+client networking effects. The estimation of $A$ uses \emph{only} client
+residuals after removing trace-visible server latency. Thus, execution and
+client overhead learning are cleanly decoupled.
+
+% -------------------------
+\subsubsection{Algorithm summary (featurized baseline)}
+\label{subsubsec:featurized_baseline_algorithm_summary}
+
+Given environment features $(x_e,z_e)$ and data (traces and client latencies),
+the baseline proceeds as:
+\begin{enumerate}
+  \item \textbf{From traces:} infer step counts $N_i$ and construct
+  pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t)$, $p^{\mathrm{dec}}(t)$ on the
+  trace-induced grid; compute uniform correction $c(t)$; compute exposures
+  $(A_i^{\mathrm{pf}},A_i^{\mathrm{dec}})$ for each phase instance; solve the
+  global NNLS \eqref{eq:global_nnls_B} to obtain $\widehat B$.
+  \item \textbf{From client data:} compute trace-visible server latency
+  $S^{\mathrm{trace}}_{r,e}$ and residuals $R_{r,e}$; solve NNLS
+  \eqref{eq:global_nnls_A} to obtain $\widehat A$.
+\end{enumerate}
+
+The resulting featurized coefficients for any environment $e$ are:
+\[
+\widehat\beta_e = x_e^\top \widehat B,
+\qquad
+\widehat\alpha_e = z_e^\top \widehat A,
+\]
+which can be used by BLIS to parameterize simulation in a portable manner.
 
 \paragraph{Transfer and one-shot recalibration.}
 Given learned maps $(\widehat B,\widehat A)$, a new environment $e^\star$ requires
@@ -917,7 +719,7 @@ prediction:
 +
 \beta_2 A_i^{\mathrm{dec}}
 -
-T_i
+\ell_i
 \right)^2
 \;+\;
 \lambda_{\mathrm{recal}}
@@ -926,6 +728,8 @@ T_i
 \right\|_2^2.
 \label{eq:recalibration_to_featurized_prior}
 \end{equation}
+Here $(N_i, A_i^{\mathrm{pf}}, A_i^{\mathrm{dec}})$
+are constructed from traces in $e$ exactly as in the baseline estimator.
 This objective remains convex and retains the same coefficient semantics as the
 baseline trace estimator.
 The regularizer implements partial pooling: it allows environment-specific
@@ -985,10 +789,9 @@ In practice, variation in model size, parallelism, GPU generation, and
 interconnect properties is sufficient to yield well-conditioned estimates.
 
 Feature construction is linear in the number of trace instances and client
-requests.
-The NNLS problems in Eqs.~\eqref{eq:nnls_B_featurized} and
-\eqref{eq:nnls_A_featurized} are convex with $3d_x$ and $3d_z$ unknowns,
-respectively, and can be solved efficiently using standard QP/NNLS solvers.
+requests. The NNLS problems in this estimator are convex with 
+$3d_x$ and $3d_z$ unknowns, respectively, and can be solved efficiently 
+using standard QP/NNLS solvers.
 
 \paragraph{Summary.}
 Featurized coefficients allow BLIS to learn portable execution and client-overhead
@@ -999,15 +802,7 @@ interpretability of the trace-decomposed baseline.
 \section{Continuous Kernelized EM with Boundary-Aware Step Densities}
 \label{sec:em_continuous_kernelized}
 
-We now present a fully continuous-time EM formulation that retains the
-conceptual elegance of the idealized EM while achieving the same robustness
-to instrumentation noise as the kernelized micro-grid EM, without introducing
-any explicit discretization of time.
-This formulation operates directly on continuous latent step densities and
-may be viewed as the limit of the kernelized grid EM as grid resolution tends
-to zero.
-
-The key ingredients are:
+There are three key ingredients in this algorithm.
 (i) continuous boundary-aware phase membership kernels,
 (ii) end-localized kernels for the final prefill step,
 and (iii) optional low-pass smoothing of trace-derived pressures.
@@ -1044,7 +839,6 @@ support (e.g., by enforcing $\beta^{(m-1)}_0\ge \beta_{0,\min}>0$ or, equivalent
 clamping $\Delta^{(m)}(t)\leftarrow \max\{\Delta^{(m)}(t),\Delta_{\min}\}$ for a
 small $\Delta_{\min}>0$). This ensures $\lambda^{(m)}(t)$ is finite and the
 normalizations below are well-defined.
-
 
 % ------------------------------------------------------------
 \paragraph{Boundary-aware phase membership kernels.}
