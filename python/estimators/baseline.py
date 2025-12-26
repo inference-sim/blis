@@ -87,8 +87,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Union, Literal
 
+import json
 import numpy as np
+import os
 import pandas as pd
+import glob
 from sklearn.linear_model import LinearRegression
 
 
@@ -1387,23 +1390,39 @@ def _example() -> None:
 
     This is only a smoke test demonstrating expected input schema.
     """
-    phases = pd.DataFrame(
-        [
-            {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 2.0, "prefill_tokens": 96, "decode_tokens": 0},
-            {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 6.0, "prefill_tokens": 0,  "decode_tokens": 4},
-            {"request_id": "B", "phase_type": "prefill", "t_start": 1.0, "t_end": 3.0, "prefill_tokens": 64, "decode_tokens": 0},
-            {"request_id": "B", "phase_type": "decode",  "t_start": 3.0, "t_end": 5.0, "prefill_tokens": 0,  "decode_tokens": 2},
-        ]
-    )
+    # phases = pd.DataFrame(
+    #     [
+    #         {"request_id": "A", "phase_type": "prefill", "t_start": 0.0, "t_end": 2.0, "prefill_tokens": 96, "decode_tokens": 0},
+    #         {"request_id": "A", "phase_type": "decode",  "t_start": 2.0, "t_end": 6.0, "prefill_tokens": 0,  "decode_tokens": 4},
+    #         {"request_id": "B", "phase_type": "prefill", "t_start": 1.0, "t_end": 3.0, "prefill_tokens": 64, "decode_tokens": 0},
+    #         {"request_id": "B", "phase_type": "decode",  "t_start": 3.0, "t_end": 5.0, "prefill_tokens": 0,  "decode_tokens": 2},
+    #     ]
+    # )
 
-    res = estimate_betas_baseline(phases, chunk_size=64)
-    print("Estimated betas (baseline):")
-    print(f"  beta0 (sec/step):  {res.beta0:.6f}")
-    print(f"  beta1 (sec/token): {res.beta1:.6f}")
-    print(f"  beta2 (sec/token): {res.beta2:.6f}")
-    print("\nDiagnostics:")
-    for k, v in res.diagnostics.items():
-        print(f"  {k}: {v}")
+    train_path = os.path.join("data/traces/train", "*/")
+    all_train = glob.glob(train_path)
+    for train_path in all_train:
+        phases_path = os.path.join(train_path, "vllm_phases.csv")
+        phases = pd.read_csv(phases_path)
+        res = estimate_betas_baseline(phases, chunk_size=64)
+        models_dir = os.path.join(train_path, "models")
+        os.makedirs(models_dir, exist_ok=True)
+        models_path = os.path.join(models_dir, "BLIS_beta_metrics.json")
+        betas = {
+            "beta0": res.beta0,
+            "beta1": res.beta1,
+            "beta2": res.beta2
+        }
+        with open(models_path, "w+") as f:
+            json.dump(betas, f)
+
+        print("Estimated betas (baseline):")
+        print(f"  beta0 (sec/step):  {res.beta0:.6f}")
+        print(f"  beta1 (sec/token): {res.beta1:.6f}")
+        print(f"  beta2 (sec/token): {res.beta2:.6f}")
+        print("\nDiagnostics:")
+        for k, v in res.diagnostics.items():
+            print(f"  {k}: {v}")
 
 
 if __name__ == "__main__": # pragma: no cover
