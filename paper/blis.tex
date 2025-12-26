@@ -83,6 +83,9 @@
 
 \maketitle
 
+\section{Front matter -- placeholder}
+\label{sec:front}
+
 % ============================================================
 \subsection{vLLM Execution Model (Serving Semantics)}
 \label{subsec:vllm-overview}
@@ -140,10 +143,6 @@ These invariants induce a natural \emph{step-level execution model}, which
 serves as the foundation for the latency model and coefficient estimation
 procedures developed in the remainder of the paper.
 
-% ============================================================
-\section{Latency Model}
-\label{sec:latency-model}
-
 We now formalize the latency model used by BLIS.
 The model decomposes request latency into a sequence of stages corresponding to
 request ingress, engine execution, and response egress.
@@ -183,13 +182,13 @@ in Figure~\ref{fig:req-lifecycle} and described below.
 \paragraph*{1. Ingress.}
 A client emits an inference request $i$ to the server.
 This stage contributes a network latency that depends linearly on the number of
-input tokens $\ell_i^{\mathrm{in}}$.
+input tokens $\nu_i^{\mathrm{in}}$.
 
 \paragraph*{2. Pre-processing.}
 The API layer tokenizes the input, performs lightweight validation, and enqueues
 the request for execution.
 This stage contributes a latency that depends linearly on
-$\ell_i^{\mathrm{in}}$ and does not interact with GPU scheduling.
+$\nu_i^{\mathrm{in}}$ and does not interact with GPU scheduling.
 
 \paragraph*{3. Scheduling.}
 The request waits in the engine queue until it is admitted into a busy-loop
@@ -215,12 +214,12 @@ are generated during decode.
 Once all output tokens are produced, the API layer detokenizes the generated
 sequence and prepares the final response.
 This stage contributes a latency that depends linearly on the number of output
-tokens $\ell_i^{\mathrm{out}}$.
+tokens $\nu_i^{\mathrm{out}}$.
 
 \paragraph*{7. Egress.}
 The server transmits the response back to the client.
 This contributes a network latency that depends linearly on
-$\ell_i^{\mathrm{out}}$.
+$\nu_i^{\mathrm{out}}$.
 
 \paragraph{Modeling focus.}
 Among these stages, only prefill and decode interact with the engine busy loop
@@ -230,18 +229,8 @@ modeled at step granularity.
 
 
 % ============================================================
-\section{Featurized Baseline Estimation from Trace and Client Observations}
-\label{sec:featurized_baseline}
-
-This section unifies (i) trace-only estimation of step-level execution
-coefficients and (ii) Thus, execution and server-side queueing/interference 
-are absorbed into traces, while client-only overhead is learned 
-from residuals. The key outcome is a portable, environment-conditioned 
-latency model in which \emph{server execution} coefficients and 
-\emph{client-visible overhead} coefficients are learned via nonnegative 
-linear maps from environment features. Throughout, we assume 
-\emph{no per-step instrumentation}: traces do not expose busy-loop step 
-boundaries or per-step runtimes.
+\section{Problem formulation}
+\label{sec:problem_formulation}
 
 % ------------------------------------------------------------
 \subsection{Observability model: what we measure (and what we do not)}
@@ -280,7 +269,7 @@ executed during prefill (prefix-cached tokens are excluded).
 \paragraph{Client-side observations.}
 For a subset of requests (or for separate client experiments) in environment $e$,
 we observe per-request end-to-end latency $y_r$ and token lengths
-$\ell_r^{\mathrm{in}}$ (input tokens) and $\ell_r^{\mathrm{out}}$ (output tokens).
+$\nu_r^{\mathrm{in}}$ (input tokens) and $\nu_r^{\mathrm{out}}$ (output tokens).
 Client-side $y_r$ includes networking, serialization, streaming, and all server
 effects (queueing + execution); it is not assumed to expose internal phase
 timestamps.
@@ -292,7 +281,7 @@ Crucially, neither traces nor client data reveal:
   \item per-step runtimes;
   \item per-step token totals $(T_k^{\mathrm{pf}},T_k^{\mathrm{dec}})$.
 \end{itemize}
-The baseline estimator therefore operates by converting trace-visible
+Our estimators therefore operate by converting trace-visible
 phase overlaps into \emph{time-integrated workload exposures} suitable for
 regressing a step-level execution model.
 
@@ -333,9 +322,9 @@ L^{\mathrm{client}}_{r,e}
 =
 \alpha_{e,0}
 +
-\alpha_{e,1}\,\ell^{\mathrm{in}}_r
+\alpha_{e,1}\,\nu_r^{\mathrm{in}}
 +
-\alpha_{e,2}\,\ell^{\mathrm{out}}_r,
+\alpha_{e,2}\,\nu_r^{\mathrm{out}},
 \label{eq:client_overhead_model}
 \end{equation}
 with environment-specific coefficients
@@ -360,8 +349,8 @@ A \in \mathbb{R}^{d_z \times 3}_{\ge 0}.
 Nonnegativity of $(x_e,z_e,A,B)$ ensures physical interpretability and guarantees
 $\beta_e,\alpha_e\ge 0$ for all environments (including unseen ones).
 
-\paragraph{Learning objective (baseline).}
-The baseline estimator constructs, from trace-side observables, phase-level
+\paragraph{Learning objective}
+Our estimators constructs, from trace-side observables, phase-level
 regression features that approximate the \emph{step-aggregated} work experienced
 during each trace phase instance. These features allow learning $B$ from traces
 alone. Separately, we learn $A$ from client latencies after subtracting the
@@ -377,9 +366,26 @@ Formally, the problem is:
   linear overhead model in Eq.~\eqref{eq:client_overhead_model}.
 \end{itemize}
 
-% ------------------------------------------------------------
-\subsection{Featurized baseline estimator: definitions, features, and NNLS}
-\label{subsec:featurized_baseline_estimator}
+% ============================================================
+\section{Continuous EM for Execution Coefficients}
+\label{sec:featurized_continuous_em}
+
+\subsection{Algorithmic intuition}
+\label{subsec:algorithm_intuition}
+
+At a high level, Continuous EM alternates between two questions.
+First: given current estimates of execution speed, where in time would the
+engine’s busy-loop steps most plausibly have occurred within each observed
+phase window?
+Second: given that implied placement of steps, what execution speeds best
+explain the observed phase durations?
+The algorithm iterates between these two steps, progressively refining both
+the inferred step allocation and the execution coefficients until they are
+mutually consistent.
+
+
+\subsection{Trace pressures}
+\label{subsec:trace_pressures}
 
 This subsection defines (i) how we infer per-phase step counts from token totals,
 (ii) how we compute trace-derived token ``pressures'' and integrated exposures,
@@ -430,9 +436,7 @@ so the \emph{missing mass} relative to a full chunk is
 \mu_r = C - \rho_r \in [0,C).
 \label{eq:mu_def_featurized}
 \end{equation}
-Ignoring $\mu_r$ systematically overstates prefill token work. The baseline
-handles this via a trace-only correction in \emph{exposure space}
-(Section~\ref{subsubsec:pressures_exposures}).
+Ignoring $\mu_r$ systematically overstates prefill token work.
 
 % -------------------------
 \subsubsection{Trace-derived pressures and integrated token exposures}
@@ -444,6 +448,16 @@ boundaries $\{t_{i,s}\}\cup\{t_{i,e}\}$ within environment $e$.
 This partitions time into half-open grid cells $[g_j,g_{j+1})$, on which phase
 membership is constant.
 
+\paragraph{Implementation (grid-exact integrals).}
+All integrals are computed exactly on the trace-induced grid: 
+for any piecewise-constant signal $f(t)$,
+\[
+\int_{t_{i,s}}^{t_{i,e}} f(t)\,dt
+=
+\sum_{j=1}^J f_j \cdot \bigl|\,[t_{i,s},t_{i,e})\cap[g_j,g_{j+1})\,\bigr|,
+\]
+where $f_j$ is the constant value of $f(t)$ on cell $[g_j,g_{j+1})$.
+
 \paragraph{Instantaneous phase indicators.}
 Define binary indicators at wall-clock time $t$:
 \[
@@ -454,157 +468,387 @@ d_r(t)=\mathbf{1}\{r \text{ is in decode at }t\}.
 These are trace-visible because prefill/decode phase windows are observed.
 
 \paragraph{Token pressures (units: tokens/step).}
-We define piecewise-constant \emph{pressures} that quantify how many tokens would
-be attributed to a representative step executed at time $t$:
+We introduce time-varying \emph{token pressures} that describe the amount of
+token work attributable, in expectation, to a representative busy-loop step
+executed at wall-clock time $t$.
+These pressures are derived from trace-visible phase overlaps and abstract away
+the exact placement of individual steps.
+
+For decode, the pressure is uniquely determined by phase membership:
 \begin{align}
 p^{\mathrm{dec}}(t)
 &:= \sum_r d_r(t),
-&&\text{(decode: 1 token per active decode request per step)}
+&&\text{(decode: one token per active decode request per step)}.
 \label{eq:pressure_decode_featurized}
-\\
+\end{align}
+
+For prefill, we first define a full-chunk \emph{baseline} pressure
+$p^{\mathrm{pf}}_{\mathrm{full}}(t)$:
+\begin{align}
 p^{\mathrm{pf}}_{\mathrm{full}}(t)
-&:= C\sum_r a_r(t).
-&&\text{(prefill: full-chunk assumption)}
+&:= C \sum_r a_r(t),
+&&\text{(prefill: full-chunk assumption)}.
 \label{eq:pressure_prefill_full_featurized}
 \end{align}
-The baseline starts from $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and subtracts a
-trace-only correction for partial chunks.
+This baseline corresponds to the approximation that each active prefill request
+contributes a full chunk of $C$ tokens per step.
+To account for the final partial prefill chunk, we introduce an \emph{effective}
+(prefill) pressure $\mathrm{pf}_e(t;\beta_e)$, defined in
+Section~\ref{sec:partial_prefill_chunk_correction}.
 
-\paragraph{Prefill partial-chunk correction signal (units: tokens/sec).}
-We use a trace-only \emph{uniform redistribution} correction that preserves
-missing token mass exactly in time integrals.
-Let $[t^{\mathrm{pf}}_{r,s},t^{\mathrm{pf}}_{r,e})$ denote request $r$'s observed
-prefill interval (from its prefill phase instance). Define
+% ------------------------------------------------------------
+\subsection{Latent step model and step-rate function}
+
+We consider a fixed environment $e$ with feature vector $x_e$ and trace data
+$\mathcal{I}_e$.
+Execution proceeds as a sequence of latent busy-loop steps indexed by $k$.
+Each step processes some number of prefill and decode tokens and has duration
 \begin{equation}
-c_r(t)
+\Delta t_k
 =
-\frac{\mu_r}{t^{\mathrm{pf}}_{r,e}-t^{\mathrm{pf}}_{r,s}}
-\,
-\mathbf{1}\{t\in[t^{\mathrm{pf}}_{r,s},t^{\mathrm{pf}}_{r,e})\},
-\qquad
-c(t)=\sum_r c_r(t),
-\label{eq:prefill_correction_uniform_featurized}
+\beta_{e,0}
++
+\beta_{e,1}\,T^{\mathrm{pf}}_k
++
+\beta_{e,2}\,T^{\mathrm{dec}}_k,
+\label{eq:em_step_model}
 \end{equation}
-so $\int c_r(t)\,dt=\mu_r$ and $\int c(t)\,dt=\sum_r \mu_r$.
+where $\beta_e=(\beta_{e,0},\beta_{e,1},\beta_{e,2})\in\mathbb{R}^3_{\ge 0}$.
 
-\paragraph{Phase-local step density proxy (units: steps/sec).}
-For each phase instance $i$ with inferred step count $N_i$ and observed duration
-$\ell_i=t_{i,e}-t_{i,s}$, define
+\paragraph{Local step-time proxy}
+In EM iteration $m=1,2,\ldots$, we set $\beta_e^{(m-1)} := x_e^\top B^{(m-1)}$
+and use the \emph{effective} prefill pressure evaluated at the previous iterate,
+\[
+p^{\mathrm{pf},(m-1)}_e(t)
+:=
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+-
+\delta_e\!\left(t;\beta_e^{(m-1)}\right),
+\]
+to form the iteration-specific proxy
 \begin{equation}
-\widehat\lambda_i := \frac{N_i}{\ell_i}.
-\label{eq:lambda_hat_featurized}
+\Delta_{e,(m)}(t)
+=
+\beta^{(m-1)}_{e,0}
++
+\beta^{(m-1)}_{e,1}\,p^{\mathrm{pf},(m-1)}_e(t)
++
+\beta^{(m-1)}_{e,2}\,p^{\mathrm{dec}}(t).
+\label{eq:em_step_time_proxy}
 \end{equation}
-This proxy is used \emph{only} to convert time-integrated pressures
-(tokens/step $\times$ sec) into token totals (tokens) for regression features.
+This ``one-iterate lag'' ensures that the E-step uses a fully specified
+(prefill) workload signal while avoiding a fixed-point solve within an EM
+iteration.
 
-\paragraph{Integrated exposures (units: tokens).}
-For each phase instance $i$, define its baseline token exposures
+\paragraph{Step-rate (intensity).}
+The corresponding step-rate is defined as
+\begin{equation}
+\lambda_e(t;\beta_e)
+=
+\frac{1}{\Delta_e(t;\beta_e)},
+\qquad
+\text{units: steps/sec}.
+\label{eq:em_step_rate}
+\end{equation}
+In EM iteration $m$, we evaluate Eq.~\eqref{eq:em_step_rate} using the
+iteration-specific proxy $\Delta_{e,(m)}(t)$ from
+Eq.~\eqref{eq:em_step_time_proxy} (i.e., we set
+$\lambda_{e,(m)}(t):=1/\Delta_{e,(m)}(t)$).
+
+We assume $\Delta_e(t;\beta_e)>0$ for all $t$ in the trace support, 
+which can be ensured by clamping
+$\Delta_e(t)\leftarrow\max\{\Delta_e(t),\Delta_{\min}\}$ for a small
+$\Delta_{\min}>0$.
+
+% ------------------------------------------------------------
+\subsection{Phase membership and latent step densities}
+
+For each phase instance $i\in\mathcal{I}_e$ with observed start and end times
+$(t_{i,s},t_{i,e})$ and inferred step count $N_i$, we introduce a continuous
+phase-membership function $w_i(t)\in[0,1]$ that captures uncertainty near
+instrumented boundaries.
+A simple boundary-aware choice is
+\begin{equation}
+w_i(t)
+=
+F_h(t-t_{i,s})\,
+\bigl(1-F_h(t-t_{i,e})\bigr),
+\label{eq:em_phase_membership}
+\end{equation}
+where $F_h$ is a one-sided cumulative kernel with bandwidth $h>0$
+(e.g., $F_h(x)=1-e^{-x/h}$ for $x\ge 0$).
+By construction, $w_i(t)=1$ throughout the interior of the observed phase window
+and decays smoothly to zero near its boundaries.
+
+Conditioned on execution coefficients $\beta_e$, we model the latent placement
+of the $N_i$ steps of phase $i$ as independent draws from a continuous density
+proportional to the step-rate.
+The posterior step-density for phase $i$ is
+\begin{equation}
+q_i(t \mid \beta_e)
+=
+\frac{w_i(t)\,\lambda_e(t;\beta_e)}
+{\int w_i(u)\,\lambda_e(u;\beta_e)\,du},
+\label{eq:em_phase_step_density}
+\end{equation}
+which integrates to one.
+The expected number of steps of phase $i$ occurring in an infinitesimal interval
+$dt$ is $N_i\,q_i(t\mid\beta_e)\,dt$.
+
+% ------------------------------------------------------------
+\subsection{Partial prefill chunk correction}
+\label{sec:partial_prefill_chunk_correction}
+
+For a prefill request $r$, exactly one of its $N_r^{\mathrm{pf}}$ prefill steps
+processes fewer than $C$ tokens.
+Let $\mu_r$ denote the missing token mass of that final step
+(defined in Eq.~\eqref{eq:mu_def_featurized}).
+
+We localize the final prefill step near the observed end of the prefill phase
+using a boundary-local kernel $\varphi_r(t)$ supported on $(-\infty,t_{r,e}]$,
+normalized to integrate to one. 
+Concretely, we define $\varphi_r(t)$ as a one-sided exponential kernel:
+\begin{equation}
+\varphi_r(t)
+=
+\frac{1}{h}\,
+\exp\!\left(-\frac{t_{r,e}-t}{h}\right)
+\mathbf{1}\{t \le t_{r,e}\},
+\label{eq:final_prefill_kernel}
+\end{equation}
+where $h>0$ is a bandwidth parameter controlling the temporal localization.
+By construction, $\varphi_r(t)$ is nonnegative, supported on
+$(-\infty,t_{r,e}]$, and satisfies
+$\int \varphi_r(t)\,dt = 1$.
+
+The corresponding posterior density of the final prefill step is
+\begin{equation}
+q^{\mathrm{final}}_r(t \mid \beta_e)
+=
+\frac{\varphi_r(t)\,\lambda_e(t;\beta_e)}
+{\int \varphi_r(u)\,\lambda_e(u;\beta_e)\,du}.
+\label{eq:em_final_step_density}
+\end{equation}
+
+The expected missing-token correction per step is then
+\begin{equation}
+\delta_e(t;\beta_e)
+=
+\frac{\sum_r \mu_r\,q^{\mathrm{final}}_r(t\mid\beta_e)}
+{\lambda_e(t;\beta_e)},
+\qquad
+\text{units: tokens/step}.
+\label{eq:em_partial_chunk_correction}
+\end{equation}
+
+The effective prefill pressure used in EM is
+\begin{equation}
+p^{\mathrm{pf}}_e(t)
+=
+p^{\mathrm{pf}}_{\mathrm{full}}(t)
+-
+\delta_e(t;\beta_e),
+\label{eq:em_effective_prefill_pressure}
+\end{equation}
+which ensures that each request contributes exactly one partial prefill chunk
+in expectation.
+
+\paragraph{Dependence on $\beta_e$.}
+Because $\delta_e(t;\beta_e)$ in Eq.~\eqref{eq:em_partial_chunk_correction}
+depends on the step-rate $\lambda_e(t;\beta_e)$, the effective prefill pressure
+$p^{\mathrm{pf}}_e(t)$ in Eq.~\eqref{eq:em_effective_prefill_pressure}
+is $\beta_e$-dependent.
+To emphasize this, we will sometimes write
+$p^{\mathrm{pf}}_e(t;\beta_e)$, though we drop the explicit argument when
+unambiguous.
+
+% ------------------------------------------------------------
+\subsection{EM objective and updates}
+
+\paragraph{Overview of the EM procedure.}
+The continuous EM algorithm proceeds in iterations indexed by
+$m = 0,1,2,\ldots$ and operates on the \emph{global} feature-to-execution map
+$B$.
+At iteration $m \geq 1$, environment-specific execution coefficients are obtained as
+$\beta_e^{(m-1)} := x_e^\top B^{(m-1)}$ for each environment $e$.
+These coefficients are used in the E-step to infer trace-consistent latent step
+allocations and step-averaged token exposures.
+In the M-step, the global map $B$ is updated via a pooled nonnegative
+least-squares solve across all training environments.
+Iterations continue until convergence of $B$ (up to a prescribed tolerance) or
+until a fixed maximum number of iterations is reached. We handle the special case
+of Iteration $0$ in Section \ref{subsec:initialization}.
+
+\paragraph{E-step.}
+Given the current global map $B^{(m-1)}$, we set $\beta_e^{(m-1)} := x_e^\top B^{(m-1)}$
+for each environment $e$. In iteration $m$, all E-step quantities are 
+evaluated at $\beta_e^{(m-1)}$. We compute:
+\begin{itemize}
+  \item the step-rate $\lambda_e(t;\beta_e^{(m-1)})$;
+  \item phase step densities $q_i(t\mid\beta_e^{(m-1)})$;
+  \item effective prefill pressure $p^{\mathrm{pf}}_e(t)$.
+\end{itemize}
+
+Using these quantities, form step-averaged pressures
 \begin{align}
-A^{\mathrm{pf}}_i
-&:=
-\widehat\lambda_i
-\int_{t_{i,s}}^{t_{i,e}}
-p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt
-\;-\;
-\int_{t_{i,s}}^{t_{i,e}}
-c(t)\,dt,
-\label{eq:Apf_def_featurized}
+\bar p^{\mathrm{pf}}_{i,(m)}
+&=
+\int q_i(t\mid\beta_e^{(m-1)})\,
+p^{\mathrm{pf}}_e(t)\,dt,
 \\
-A^{\mathrm{dec}}_i
-&:=
-\widehat\lambda_i
-\int_{t_{i,s}}^{t_{i,e}}
+\bar p^{\mathrm{dec}}_{i,(m)}
+&=
+\int q_i(t\mid\beta_e^{(m-1)})\,
 p^{\mathrm{dec}}(t)\,dt.
-\label{eq:Adec_def_featurized}
 \end{align}
-The subtraction in Eq.~\eqref{eq:Apf_def_featurized} corrects the overcount from
-treating all prefill steps as full chunks: time-integrating $c(t)$ yields the
-exact missing token mass attributed (uniformly) to the phase window, without
-introducing any step-boundary assumptions.
 
-\paragraph{Implementation (grid-exact integrals).}
-All integrals above are computed exactly on the trace-induced grid:
-for any piecewise-constant signal $s(t)$,
-\[
-\int_{t_{i,s}}^{t_{i,e}} s(t)\,dt
-=
-\sum_{j=1}^J s_j \cdot \bigl|\,[t_{i,s},t_{i,e})\cap[g_j,g_{j+1})\,\bigr|,
-\]
-where $s_j$ is the constant value of $s(t)$ on cell $[g_j,g_{j+1})$.
+\paragraph{M-step (global pooled NNLS for $B$).}
+In the M-step, we update the global execution map $B$ while enforcing the
+feature-based parameterization $\beta_e = x_e^\top B$ for all environments.
+Given step-averaged pressures
+$(\bar p^{\mathrm{pf}}_{i,(m)},\bar p^{\mathrm{dec}}_{i,(m)})$
+from the E-step, we form pooled regression rows for all phase instances
+$i\in\mathcal{I}_{\mathrm{train}}$ across all environments.
 
-% -------------------------
-\subsubsection{Featurized predictors and global NNLS for $B$ (trace-only)}
-\label{subsubsec:nnls_B_trace_only}
-
-\paragraph{Phase-level predictor in environment $e$.}
-For phase instance $i\in\mathcal{I}_e$, the baseline predicts its duration as
+For a phase instance $i$ belonging to environment $e(i)$, define
 \begin{equation}
-\widehat \ell_i(B)
-=
-N_i\,\beta_{e,0}
-+
-A_i^{\mathrm{pf}}\,\beta_{e,1}
-+
-A_i^{\mathrm{dec}}\,\beta_{e,2},
-\qquad
-\beta_e = x_e^\top B.
-\label{eq:featurized_baseline_phase_predictor}
-\end{equation}
-This preserves the semantics of the step model:
-$N_i$ counts steps, while $(A_i^{\mathrm{pf}},A_i^{\mathrm{dec}})$ approximate
-step-aggregated token totals experienced during the phase.
-
-\paragraph{Linearization in $\mathrm{vec}(B)$.}
-Let $b_0,b_1,b_2\in\mathbb{R}^{d_x}_{\ge 0}$ denote the columns of $B$.
-Then Eq.~\eqref{eq:featurized_baseline_phase_predictor} becomes
-\[
-\widehat \ell_i(B)
-=
-N_i(x_e^\top b_0)
-+
-A_i^{\mathrm{pf}}(x_e^\top b_1)
-+
-A_i^{\mathrm{dec}}(x_e^\top b_2),
-\]
-which is linear in the entries of $B$.
-Define the per-instance row (dimension $1\times 3d_x$)
-\begin{equation}
-\phi_i
+\phi_{i,(m)}
 :=
 \big[
-N_i x_e^\top,\;
-A_i^{\mathrm{pf}} x_e^\top,\;
-A_i^{\mathrm{dec}} x_e^\top
+N_i x_{e(i)}^\top,\;
+N_i\bar p^{\mathrm{pf}}_{i,(m)} x_{e(i)}^\top,\;
+N_i\bar p^{\mathrm{dec}}_{i,(m)} x_{e(i)}^\top
 \big],
-\label{eq:phi_row_def}
+\label{eq:phi_em_row}
 \end{equation}
 and let $\theta := \mathrm{vec}(B)$ stack the columns of $B$.
-Then $\widehat \ell_i(B)=\phi_i \theta$.
-
-\paragraph{Global trace NNLS for $B$.}
-Stacking all phase instances across environments, we solve:
+The M-step solves the pooled nonnegative least-squares problem
 \begin{equation}
-\widehat B
+\widehat B^{(m)}
 =
 \arg\min_{B\in\mathbb{R}^{d_x\times 3}_{\ge 0}}
-\sum_{e\in\mathcal{E}}
-\sum_{i\in\mathcal{I}_e}
+\sum_{i\in\mathcal{I}_{\mathrm{train}}}
 \left(
-\widehat \ell_i(B) - \ell_i
-\right)^2.
-\label{eq:global_nnls_B}
+\phi_{i,(m)}\,\mathrm{vec}(B) - \ell_i
+\right)^2 .
+\label{eq:em_mstep_pooled_B}
 \end{equation}
-This is a convex NNLS problem in $\theta=\mathrm{vec}(B)$.
+This jointly updates the execution coefficients across all environments,
+enforcing a shared feature-to-performance map.
 
-\paragraph{Interpretation.}
-Because $\ell_i$ includes admission delay, batching delay, contention, and
-execution within the server, $\widehat B$ is learned directly from
-\emph{server-visible} behavior using traces only, without requiring a separate
-queueing model.
+\subsection{Iteration 0: Initialization via aggregated workloads}
+\label{subsec:initialization}
+
+\paragraph{Initialization as a trivial E-step.}
+Initialization can be interpreted as a degenerate first EM iteration in which
+the latent structure is intentionally weakened.
+For each phase instance $i$ with observed window
+$[t_{i,s},t_{i,e})$, we set the latent step density to be uniform:
+\begin{equation}
+q_i^{(0)}(t)
+:=
+\frac{1}{\ell_i}\,
+\mathbf{1}\!\left\{ t \in [t_{i,s}, t_{i,e}) \right\},
+\qquad
+\ell_i := t_{i,e} - t_{i,s}.
+\label{eq:uniform_q_initialization}
+\end{equation}
+Under this assignment, no step-rate $\lambda_e(t;\beta_e)$ is evaluated, no
+partial-chunk correction $\delta_e(t;\beta_e)$ is introduced, and no kernel
+localization is applied.
+
+\paragraph{Induced regression features.}
+With $q_i^{(0)}(t)$ uniform, the step-averaged token pressures reduce to simple
+time averages over the observed phase window:
+\begin{align}
+\bar p^{\mathrm{pf,base}}_i
+&:=
+\frac{1}{\ell_i}
+\int_{t_{i,s}}^{t_{i,e}}
+p^{\mathrm{pf}}_{\mathrm{full}}(t)\,dt,
+\\
+\bar p^{\mathrm{dec,base}}_i
+&:=
+\frac{1}{\ell_i}
+\int_{t_{i,s}}^{t_{i,e}}
+p^{\mathrm{dec}}(t)\,dt.
+\end{align}
+
+\paragraph{Identical M-step.}
+Using these features, the M-step at iteration $m=0$ is carried out exactly as in
+Eq.~\eqref{eq:em_mstep_pooled_B}, yielding the initial estimate $B^{(0)}$.
+
+
+
+% ------------------------------------------------------------
+\subsection{Transfer and optional NNLS recalibration for a new environment}
+\label{subsec:transfer}
+
+Let $e^\star$ be a new deployment environment with feature vector $x_{e^\star}$.
+
+\paragraph{Zero-shot transfer.}
+After training, BLIS produces a single global execution map $\widehat B$ learned
+from pooled trace data across environments.
+For a new environment $e^\star$---including one with no trace data---execution
+coefficients are predicted in a zero-shot manner as
+\begin{equation}
+\beta^{\mathrm{feat}}_{e^\star}
+:=
+x_{e^\star}^\top \widehat B .
+\label{eq:zero_shot_beta}
+\end{equation}
+This feature-based prediction is physically valid by construction and enables
+immediate latency and throughput estimation without requiring any traces from
+$e^\star$.
+
+\paragraph{Optional NNLS recalibration with trace data.}
+When trace data $\mathcal{I}_{e^\star}$ is available for the new environment,
+BLIS optionally performs a lightweight environment-local recalibration to refine
+$\beta_{e^\star}$ while keeping the global map $\widehat B$ fixed.
+Using trace-derived step counts $N_i$ and surrogate step-averaged pressures
+$(\bar p^{\mathrm{pf,base}}_i,\bar p^{\mathrm{dec,base}}_i)$ from
+Section~\ref{subsec:initialization}, we solve the convex nonnegative
+least-squares problem
+\begin{equation}
+\widehat\beta_{e^\star}
+=
+\arg\min_{\beta\in\mathbb{R}^3_{\ge 0}}
+\Bigg[
+\sum_{i\in\mathcal{I}_{e^\star}}
+\left(
+N_i\beta_0
++
+N_i\bar p^{\mathrm{pf,base}}_i\,\beta_1
++
+N_i\bar p^{\mathrm{dec,base}}_i\,\beta_2
+-
+\ell_i
+\right)^2
++
+\lambda_{\mathrm{recal}}
+\left\|
+\beta - \beta^{\mathrm{feat}}_{e^\star}
+\right\|_2^2
+\Bigg].
+\label{eq:nnls_recalibration_beta}
+\end{equation}
+The regularization parameter $\lambda_{\mathrm{recal}}\ge 0$ controls the degree
+of trust in the feature-based prediction: $\lambda_{\mathrm{recal}}=0$ yields a
+purely trace-driven fit, while larger values encourage adherence to the
+zero-shot prior.
+
+\paragraph{Separation of roles.}
+Pooled EM is used \emph{only} during training to learn the global execution map
+$\widehat B$.
+Transfer to a new environment relies on zero-shot prediction via features, with
+optional NNLS recalibration as a strictly local post-processing step.
+This separation preserves generalization, avoids overfitting in low-data
+regimes, and keeps transfer lightweight and robust.
+
 
 % -------------------------
-\subsubsection{Learning $A$ from client residuals (decoupled from execution)}
-\label{subsubsec:nnls_A_client}
+\section{Learning $A$ from client residuals}
+\label{sec:nnls_A_client}
 
 \paragraph{Trace-visible server latency per request.}
 For a request $r$ in environment $e$, traces provide its prefill phase duration
@@ -635,9 +879,9 @@ R_{r,e}
 \approx
 (z_e^\top a_0)
 +
-\ell_r^{\mathrm{in}}(z_e^\top a_1)
+\nu_r^{\mathrm{in}}(z_e^\top a_1)
 +
-\ell_r^{\mathrm{out}}(z_e^\top a_2),
+\nu_r^{\mathrm{out}}(z_e^\top a_2),
 \]
 where $a_0,a_1,a_2$ are columns of $A$.
 Define the per-request row
@@ -646,8 +890,8 @@ Define the per-request row
 :=
 \big[
 1\cdot z_e^\top,\;
-\ell_r^{\mathrm{in}} z_e^\top,\;
-\ell_r^{\mathrm{out}} z_e^\top
+\nu_r^{\mathrm{in}} z_e^\top,\;
+\nu_r^{\mathrm{out}} z_e^\top
 \big],
 \]
 and stack across all observed client requests to solve the global NNLS:
@@ -668,75 +912,9 @@ client networking effects. The estimation of $A$ uses \emph{only} client
 residuals after removing trace-visible server latency. Thus, execution and
 client overhead learning are cleanly decoupled.
 
-% -------------------------
-\subsubsection{Algorithm summary (featurized baseline)}
-\label{subsubsec:featurized_baseline_algorithm_summary}
+\subsection{One-shot recalibration of client-side overheads}
+\label{subsec:client-side-recalibration}
 
-Given environment features $(x_e,z_e)$ and data (traces and client latencies),
-the baseline proceeds as:
-\begin{enumerate}
-  \item \textbf{From traces:} infer step counts $N_i$ and construct
-  pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t)$, $p^{\mathrm{dec}}(t)$ on the
-  trace-induced grid; compute uniform correction $c(t)$; compute exposures
-  $(A_i^{\mathrm{pf}},A_i^{\mathrm{dec}})$ for each phase instance; solve the
-  global NNLS \eqref{eq:global_nnls_B} to obtain $\widehat B$.
-  \item \textbf{From client data:} compute trace-visible server latency
-  $S^{\mathrm{trace}}_{r,e}$ and residuals $R_{r,e}$; solve NNLS
-  \eqref{eq:global_nnls_A} to obtain $\widehat A$.
-\end{enumerate}
-
-The resulting featurized coefficients for any environment $e$ are:
-\[
-\widehat\beta_e = x_e^\top \widehat B,
-\qquad
-\widehat\alpha_e = z_e^\top \widehat A,
-\]
-which can be used by BLIS to parameterize simulation in a portable manner.
-
-\paragraph{Transfer and one-shot recalibration.}
-Given learned maps $(\widehat B,\widehat A)$, a new environment $e^\star$ requires
-only its feature vectors $(x_{e^\star},z_{e^\star})$ to produce coefficients:
-\[
-\beta^{\mathrm{feat}}_{e^\star} := x_{e^\star}^\top \widehat B,
-\qquad
-\alpha^{\mathrm{feat}}_{e^\star} := z_{e^\star}^\top \widehat A.
-\]
-This supports \emph{zero-shot transfer} across LLMs, GPU/interconnect backends,
-and engine configurations.
-
-When traces are available for $e^\star$, BLIS performs \emph{one-shot
-recalibration} by solving a trace NNLS objective regularized toward the featurized
-prediction:
-\begin{equation}
-\widehat \beta_{e^\star}
-=
-\arg\min_{\beta\in\mathbb{R}^3_{\ge 0}}
-\sum_{i\in\mathcal{I}_{e^\star}}
-\left(
-\beta_0 N_i
-+
-\beta_1 A_i^{\mathrm{pf}}
-+
-\beta_2 A_i^{\mathrm{dec}}
--
-\ell_i
-\right)^2
-\;+\;
-\lambda_{\mathrm{recal}}
-\left\|
-\beta-\beta^{\mathrm{feat}}_{e^\star}
-\right\|_2^2.
-\label{eq:recalibration_to_featurized_prior}
-\end{equation}
-Here $(N_i, A_i^{\mathrm{pf}}, A_i^{\mathrm{dec}})$
-are constructed from traces in $e$ exactly as in the baseline estimator.
-This objective remains convex and retains the same coefficient semantics as the
-baseline trace estimator.
-The regularizer implements partial pooling: it allows environment-specific
-deviations when supported by trace evidence, while preventing unstable fits when
-only a small trace window is available.
-
-\paragraph{One-shot recalibration of client-side overheads.}
 For a new environment $e^\star$ with paired client and trace data, we form
 trace-decomposed residuals
 \[
@@ -761,9 +939,9 @@ squares problem:
 \left(
 \alpha_0
 +
-\alpha_1 \ell_r^{\mathrm{in}}
+\alpha_1 \nu_r^{\mathrm{in}}
 +
-\alpha_2 \ell_r^{\mathrm{out}}
+\alpha_2 \nu_r^{\mathrm{out}}
 -
 R_r
 \right)^2
@@ -777,405 +955,6 @@ R_r
 This objective is convex and decoupled from server scheduling dynamics by
 construction, since all server-side queueing and interference are absorbed into
 $S_r^{\mathrm{trace}}$ and removed before fitting $\alpha$.
-
-
-% ------------------------------------------------------------
-\subsection{Identifiability and complexity}
-
-Identifiability of $B$ and $A$ requires diversity in environment features.
-If feature vectors are nearly collinear, the global design matrices become
-ill-conditioned.
-In practice, variation in model size, parallelism, GPU generation, and
-interconnect properties is sufficient to yield well-conditioned estimates.
-
-Feature construction is linear in the number of trace instances and client
-requests. The NNLS problems in this estimator are convex with 
-$3d_x$ and $3d_z$ unknowns, respectively, and can be solved efficiently 
-using standard QP/NNLS solvers.
-
-\paragraph{Summary.}
-Featurized coefficients allow BLIS to learn portable execution and client-overhead
-models from heterogeneous data, while preserving the simplicity, convexity, and
-interpretability of the trace-decomposed baseline.
-
-% ============================================================
-\section{Continuous Kernelized EM with Boundary-Aware Step Densities}
-\label{sec:em_continuous_kernelized}
-
-There are three key ingredients in this algorithm.
-(i) continuous boundary-aware phase membership kernels,
-(ii) end-localized kernels for the final prefill step,
-and (iii) optional low-pass smoothing of trace-derived pressures.
-Together, these yield a numerically stable, trace-only EM algorithm with a
-minimal number of tunable parameters.
-
-% ------------------------------------------------------------
-\paragraph{Step-rate model (iteration-indexed).}
-At EM iteration $m$, the E-step allocates step mass using the step-rate induced
-by the \emph{previous} iterate $(\beta^{(m-1)},\tilde p^{\mathrm{pf},(m-1)})$.
-Define the local step-time proxy and step-rate (intensity)
-\begin{equation}
-\Delta^{(m)}(t)
-=
-\beta^{(m-1)}_0
-+
-\beta^{(m-1)}_1\,\tilde p^{\mathrm{pf},(m-1)}(t)
-+
-\beta^{(m-1)}_2\,p^{\mathrm{dec}}(t),
-\qquad
-\lambda^{(m)}(t)=\frac{1}{\Delta^{(m)}(t)},
-\label{eq:continuous_step_rate}
-\end{equation}
-where $\lambda^{(m)}(t)$ has units of steps/sec and is interpreted as the
-instantaneous density of the latent global busy-loop steps.
-
-Although $\Delta^{(m)}(t)$ and $\lambda^{(m)}(t)$ are indexed by $m$, they depend
-only on quantities from iteration $m-1$; the superscript $(m)$ indicates that
-they are computed \emph{during} iteration $m$ and used in its E-step.
-
-\paragraph{Well-definedness.}
-For each iteration $m$, we assume $\Delta^{(m)}(t)>0$ for all $t$ in the trace
-support (e.g., by enforcing $\beta^{(m-1)}_0\ge \beta_{0,\min}>0$ or, equivalently,
-clamping $\Delta^{(m)}(t)\leftarrow \max\{\Delta^{(m)}(t),\Delta_{\min}\}$ for a
-small $\Delta_{\min}>0$). This ensures $\lambda^{(m)}(t)$ is finite and the
-normalizations below are well-defined.
-
-% ------------------------------------------------------------
-\paragraph{Boundary-aware phase membership kernels.}
-
-Let phase instance $i$ have trace-visible start and end times
-$(t_{i,s},t_{i,e})$.
-We assume a positive-delay instrumentation model
-$t^{\mathrm{obs}} = t^\star + \varepsilon$ with $\varepsilon \ge 0$.
-Under this model, uncertainty about phase membership arises only near the
-left side of observed boundaries.
-
-We define a continuous membership function
-$w_i(t)\in[0,1]$ that represents the plausibility that wall-clock time $t$
-belongs to the true execution window of phase $i$.
-Specifically,
-\begin{equation}
-w_i(t)
-=
-F_h(t - t_{i,s})\,
-\bigl(1 - F_h(t - t_{i,e})\bigr),
-\label{eq:phase_membership_kernel}
-\end{equation}
-where $F_h$ is a one-sided cumulative kernel with bandwidth $h>0$, satisfying:
-\[
-F_h(x)=0 \;\; \text{for } x\le 0,
-\qquad
-F_h(x)\uparrow 1 \;\; \text{as } x\gg h.
-\]
-A concrete choice is $F_h(x)=1-e^{-x/h}$ for $x\ge 0$.
-
-By construction, $w_i(t)=1$ throughout the interior of the observed phase
-window and deviates from unity only within an $O(h)$ neighborhood of the
-boundaries.
-No membership mass is assigned beyond the observed phase end.
-
-% ------------------------------------------------------------
-\paragraph{Optional pressure smoothing.}
-
-Trace-derived pressures $p^{\mathrm{pf}}_{\mathrm{full}}(t)$ and
-$p^{\mathrm{dec}}(t)$ may exhibit high-frequency artifacts due to timestamp
-noise.
-To suppress such artifacts, we optionally apply a symmetric low-pass kernel
-$G_h$ with the same bandwidth $h$:
-\[
-p(t) \;\leftarrow\; (G_h * p)(t).
-\]
-This smoothing affects only numerical stability and does not alter the
-statistical structure of the EM formulation.
-
-% ------------------------------------------------------------
-\paragraph{Latent step densities and E-step.}
-
-For each phase instance $i$ with trace-inferred step count $N_i$, we model
-the $N_i$ execution steps as latent events distributed in continuous time
-according to the step-rate model. 
-Conditioned on the previous iterate $(\beta^{(m-1)},\tilde p^{\mathrm{pf},(m-1)})$
-(equivalently, on the step-rate $\lambda^{(m)}$ computed in
-Eq.~\eqref{eq:continuous_step_rate}), the posterior expected step-density for phase
-$i$ is
-\begin{equation}
-q_i^{(m)}(t)
-=
-\frac{w_i(t)\,\lambda^{(m)}(t)}
-{\int w_i(u)\,\lambda^{(m)}(u)\,du}.
-\label{eq:phase_step_density}
-\end{equation}
-which integrates to one over $\mathbb{R}$.
-The expected step mass in an infinitesimal interval is then
-\[
-\mathbb{E}[N_i(dt)]
-=
-N_i\,q_i^{(m)}(t)\,dt.
-\]
-
-This continuous density is the direct analogue of fractional step allocation
-in the kernelized grid EM.
-
-% ------------------------------------------------------------
-\paragraph{Final prefill step localization.}
-
-For a prefill request $r$, exactly one of its $N_r$ steps corresponds to the
-final partial chunk.
-Let $\mu_r$ denote the missing token mass of that step.
-
-We define a boundary-local kernel $\varphi_r(t)$ concentrated immediately
-before the observed prefill end time $t_{r,e}$:
-\begin{equation}
-\varphi_r(t)
-=
-\frac{K_h(t_{r,e}-t)\,\mathbf{1}\{t\le t_{r,e}\}}
-{\int K_h(t_{r,e}-u)\,\mathbf{1}\{u\le t_{r,e}\}\,du},
-\label{eq:final_step_kernel}
-\end{equation}
-where $K_h$ is a one-sided kernel on $\mathbb{R}_{\ge 0}$ (e.g., exponential or
-truncated Gaussian).
-This kernel integrates to one and represents the posterior density of the
-final step’s location under positive delay.
-
-The corresponding final-step density (using the step-rate $\lambda^{(m)}$
-computed in Eq.~\eqref{eq:continuous_step_rate}) is
-\begin{equation}
-q^{(m)}_{r,\mathrm{final}}(t)
-=
-\frac{\varphi_r(t)\,\lambda^{(m)}(t)}
-{\int \varphi_r(u)\,\lambda^{(m)}(u)\,du}.
-\label{eq:final_step_density}
-\end{equation}
-
-The remaining $(N_r-1)$ bulk prefill steps are distributed according to
-$q_i^{(m)}(t)$.
-
-% ------------------------------------------------------------
-\paragraph{Exact partial-chunk correction.}
-
-The expected rate of final-step events per unit time is $q^{(m)}_{r,\mathrm{final}}(t)$,
-which integrates to one.
-To convert missing-token mass into a per-step correction, we normalize by the
-global step-rate:
-\begin{equation}
-\delta^{(m)}(t)
-=
-\frac{\sum_r \mu_r\, q^{(m)}_{r,\mathrm{final}}(t)}
-{\lambda^{(m)}(t)},
-\qquad
-\text{units: tokens/step}.
-\label{eq:continuous_partial_chunk}
-\end{equation}
-
-The effective prefill pressure is then
-\begin{equation}
-\tilde p^{\mathrm{pf},(m)}(t)
-=
-p^{\mathrm{pf}}_{\mathrm{full}}(t) - \delta^{(m)}(t).
-\end{equation}
-By construction, each request contributes exactly one partial chunk in
-expectation, independent of timestamp noise or numerical discretization.
-
-% ------------------------------------------------------------
-\paragraph{M-step.}
-
-Given the expected step densities, we compute step-averaged pressures
-\begin{align}
-\bar p^{\mathrm{pf},(m)}_i
-&=
-\int q_i^{(m)}(t)\,\tilde p^{\mathrm{pf},(m)}(t)\,dt,
-\\
-\bar p^{\mathrm{dec},(m)}_i
-&=
-\int q_i^{(m)}(t)\,p^{\mathrm{dec}}(t)\,dt.
-\end{align}
-
-Coefficients are updated by solving the same non-negative least squares problem
-as in the idealized EM:
-\[
-\beta^{(m)}
-=
-\arg\min_{\beta\ge 0}
-\sum_{i\in\mathcal{I}}
-\left(
-N_i\beta_0
-+
-[N_i\bar p^{\mathrm{pf},(m)}_i]\beta_1
-+
-[N_i\bar p^{\mathrm{dec},(m)}_i]\beta_2
--
-\ell_i
-\right)^2.
-\]
-
-% ------------------------------------------------------------
-\paragraph{Initialization and convergence.}
-
-The algorithm is initialized using the baseline trace-only NNLS estimator,
-yielding $\beta^{(0)}$, and we set the initial effective prefill pressure to the
-full-chunk pressure:
-\[
-\tilde p^{\mathrm{pf},(0)}(t)=p^{\mathrm{pf}}_{\mathrm{full}}(t).
-\]
-Iteration $m=1$ then computes $\lambda^{(1)}(t)$ from
-$(\beta^{(0)},\tilde p^{\mathrm{pf},(0)})$ and performs the first step-aware
-allocation. Subsequent iterations incorporate exact partial-chunk correction
-through $\delta^{(m)}(t)$.
-
-Each iteration monotonically decreases the observed-data squared-error
-objective.
-The continuous formulation reduces to the idealized EM under hard membership
-kernels and to the kernelized grid EM under Riemann discretization.
-
-\paragraph{Summary.}
-This continuous kernelized EM formulation unifies the baseline, MM-style, and
-grid-based EM approaches within a single statistically principled framework.
-Boundary uncertainty is handled explicitly, partial-chunk correction remains
-exact in expectation, and robustness is achieved without sacrificing analytical
-clarity or introducing per-phase timing parameters.
-
-% ============================================================
-\subsection{Featurized Continuous EM for Execution Coefficients}
-\label{sec:featurized_continuous_em}
-
-We now extend the continuous kernelized EM formulation to the featurized setting
-introduced in Section~\ref{sec:featurized_coefficients}.
-This extension allows BLIS to learn a \emph{single global execution map}
-that transfers across environments, while retaining the step-density–aware
-refinement provided by the EM procedure.
-
-As in the baseline case, featurization applies \emph{only} to server-side
-execution coefficients.
-Client-side coefficients $\alpha$ and the matrix $A$ are estimated independently
-from trace-decomposed residuals and are unaffected by the EM procedure.
-
-% ------------------------------------------------------------
-\paragraph{Environment-indexed traces.}
-
-Let $e\in\mathcal{E}$ index deployment environments, each described by a
-nonnegative feature vector $x_e\in\mathbb{R}^{d_x}_{\ge 0}$.
-For environment $e$, trace data provides a set of phase instances
-$i\in\mathcal{I}_e$, each with:
-trace-inferred step count $N_i$,
-phase duration $\ell_i$,
-and EM-derived step-averaged pressures
-$\bar p^{\mathrm{pf},(m)}_i$ and $\bar p^{\mathrm{dec},(m)}_i$ at iteration $m$.
-
-% ------------------------------------------------------------
-\paragraph{Featurized execution model.}
-
-We parameterize environment-specific execution coefficients as
-\begin{equation}
-\beta_e = x_e^\top B,
-\qquad
-B \in \mathbb{R}^{d_x \times 3}_{\ge 0},
-\label{eq:featurized_em_beta}
-\end{equation}
-where columns of $B$ correspond to $(\beta_0,\beta_1,\beta_2)$.
-This guarantees $\beta_e\ge 0$ for all environments and preserves the physical
-interpretation of coefficients.
-
-Substituting $\beta_e$ into the step-level model yields the EM predictor
-\begin{equation}
-\widehat \ell_i(B)
-=
-N_i (x_e^\top b_0)
-+
-N_i \bar p^{\mathrm{pf},(m)}_i (x_e^\top b_1)
-+
-N_i \bar p^{\mathrm{dec},(m)}_i (x_e^\top b_2),
-\label{eq:featurized_em_predictor}
-\end{equation}
-which is linear in the unknown entries of $B$.
-
-% ------------------------------------------------------------
-\paragraph{E-step (unchanged).}
-
-The E-step is identical to that of Section~\ref{sec:em_continuous_kernelized}.
-Given the execution coefficients from the previous iteration,
-$\beta^{(m-1)}_e = x_e^\top B^{(m-1)}$, we compute:
-\begin{itemize}
-\item the environment-specific step-rate
-\(
-\lambda^{(m)}_e(t)
-\),
-\item phase membership densities $q^{(m)}_i(t)$,
-\item final-step densities $q^{(m)}_{r,\mathrm{final}}(t)$,
-\item effective prefill pressure $\tilde p^{\mathrm{pf},(m)}_e(t)$,
-\end{itemize}
-exactly as in the unfeaturized continuous EM.
-
-No additional assumptions or approximations are introduced by featurization.
-
-% ------------------------------------------------------------
-\paragraph{M-step (global, featurized).}
-
-Given step-averaged pressures from the E-step, we update the global execution map
-by solving a single nonnegative least squares problem across all environments:
-\begin{equation}
-B^{(m)}
-=
-\arg\min_{B\ge 0}
-\sum_{e\in\mathcal{E}}
-\sum_{i\in\mathcal{I}_e}
-\left(
-\widehat \ell_i(B) - \ell_i
-\right)^2.
-\label{eq:featurized_em_mstep}
-\end{equation}
-
-This objective is convex in $\mathrm{vec}(B)$ and can be solved using standard
-NNLS or QP solvers.
-The resulting update produces new environment-specific coefficients
-$\beta^{(m)}_e=x_e^\top B^{(m)}$, which are then used in the next E-step.
-
-% ------------------------------------------------------------
-\paragraph{Initialization.}
-
-The featurized EM algorithm is initialized using the featurized baseline
-estimator from Section~\ref{sec:featurized_coefficients}.
-Specifically, we set
-\[
-B^{(0)} := \widehat B_{\mathrm{baseline}},
-\qquad
-\beta^{(0)}_e = x_e^\top B^{(0)},
-\qquad
-\tilde p^{\mathrm{pf},(0)}_e(t) = p^{\mathrm{pf}}_{\mathrm{full}}(t).
-\]
-
-This ensures that the first EM iteration corresponds to a step-density–aware
-reweighting of the baseline solution.
-
-% ------------------------------------------------------------
-\paragraph{Regularization and partial pooling (optional).}
-
-To improve numerical stability when feature vectors are correlated or when some
-environments have limited trace coverage, we optionally add a ridge penalty:
-\begin{equation}
-\lambda_B \| B - B^{(0)} \|_F^2
-\end{equation}
-to Eq.~\eqref{eq:featurized_em_mstep}.
-This induces partial pooling across environments and prevents overfitting
-without altering the E-step or coefficient semantics.
-
-% ------------------------------------------------------------
-\paragraph{Interpretation and scope.}
-
-The featurized continuous EM procedure learns a portable, step-level execution
-model that:
-(i) captures fine-grained step-density effects from traces,
-(ii) transfers across LLM, GPU, and configuration regimes,
-and (iii) remains trace-only and convex in its M-step.
-
-Client-side latency coefficients $\alpha$ and the feature map $A$ are unchanged
-by this procedure and are estimated independently using trace-decomposed
-residuals, as described in Section~\ref{sec:featurized_coefficients}.
-
-\paragraph{Summary.}
-Featurized continuous EM combines the statistical efficiency of shared execution
-maps with the fidelity of step-aware latent allocation, yielding a unified,
-trace-only framework for learning transferable inference execution models.
-
 
 \bibliographystyle{plain}
 \bibliography{blis}
