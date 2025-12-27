@@ -75,7 +75,10 @@
 
 
 
-\title{BLIS: Blackbox Inference Performance Estimator}
+\title{Factorizing LLM Inference Performance 
+\\[1ex] \large Transferable Execution, Cache, and Workload Models for Fast Latency Prediction}
+
+
 \author{AI Platform Optimization Team}
 \date{\today}
 
@@ -226,6 +229,124 @@ Among these stages, only prefill and decode interact with the engine busy loop
 and contribute to step-level execution time.
 All other stages are treated as additive, request-local delays and are not
 modeled at step granularity.
+
+\section{Contributions}
+\label{sec:contributions}
+
+\paragraph{Overview.}
+This paper introduces a unified, factorized framework for modeling the performance of modern large language model (LLM) inference systems. The central insight is that end-to-end inference latency can be decomposed into a small number of reusable, composable components: execution physics, queueing dynamics, cache behavior, and workload demand. We show that each component can be learned or parameterized independently from measurements or simulation, and then recomposed to predict request-level latency distributions under new workloads, cache configurations, and deployment environments---without re-running full-fidelity simulation. This factorization enables a new class of fast, transferable, and distribution-aware performance analyses that are infeasible with existing simulators or analytical models.
+
+% ------------------------------------------------------------
+\subsection*{1. Factorized inference performance abstraction}
+
+\paragraph{Contribution.}
+We introduce a principled factorization of LLM inference performance into four orthogonal layers: (i) execution physics, capturing how GPU execution time depends on batch composition; (ii) queueing dynamics, capturing admission, interference, and concurrency effects; (iii) cache behavior, capturing prefix reuse and multi-tier KV residency; and (iv) workload demand, capturing arrival processes, request sizes, and session structure. This factorization breaks the tight coupling between workload, hardware, and simulator state that dominates existing approaches, and allows each layer to be learned, validated, and reused independently.
+
+\paragraph{Technique.}
+Formally, we express the completion latency of a request $r$ as a composition
+\[
+L_r
+=
+\mathcal{Q}\big(
+\mathcal{E}(\beta_e),\;
+\mathcal{C}(\theta_c),\;
+\mathcal{W}(w)
+\big),
+\]
+where $\mathcal{E}$ is an execution model parameterized by environment-specific coefficients $\beta_e$, $\mathcal{C}$ is a cache abstraction parameterized by $\theta_c$, and $\mathcal{W}$ is a workload generator parameterized by a profile $w$. Crucially, $\mathcal{E}$ depends only on the deployment environment, $\mathcal{C}$ depends on cache policy and capacity, and $\mathcal{W}$ depends only on client-side behavior. The queueing operator $\mathcal{Q}$ composes these components via a step-indexed stochastic process. This separation ensures that changing workloads or cache policies does not require relearning execution physics, and vice versa.
+
+% ------------------------------------------------------------
+\subsection*{2. BLIS: learned execution physics for step-synchronous inference}
+
+\paragraph{Contribution.}
+We present BLIS, a learned execution model that compresses the complex GPU execution behavior of vLLM-style inference engines into a compact, physically interpretable step-time law. BLIS captures dynamic batching, interference between prefill and decode, and chunked execution, while remaining agnostic to workload composition. This learned execution physics serves as the foundation for all higher-level queueing and cache analyses in the paper.
+
+\paragraph{Technique.}
+BLIS models inference as a sequence of step-synchronous GPU forward passes. Each step $k$ processes $T_k^{\mathrm{pf}}$ prefill tokens and $T_k^{\mathrm{dec}}$ decode tokens and has duration
+\[
+\Delta t_k
+=
+\beta_{e,0}
++
+\beta_{e,1} T_k^{\mathrm{pf}}
++
+\beta_{e,2} T_k^{\mathrm{dec}},
+\]
+where $\beta_e \in \mathbb{R}^3_{\ge 0}$ is environment-specific. We learn $\beta_e$ via a continuous EM procedure over production traces, using phase-overlap integrals to infer latent step workloads without observing step boundaries. To enable transfer across environments, we further parameterize $\beta_e = x_e^\top B$ using environment feature vectors $x_e$, yielding a global execution map $B$ that generalizes to unseen deployments.
+
+% ------------------------------------------------------------
+\subsection*{3. Aggregate step-indexed queueing model}
+
+\paragraph{Contribution.}
+We introduce an aggregate, step-indexed queueing model that captures admission control, batching interference, and concurrency effects in LLM inference without tracking individual requests. Unlike classical queueing models, our model operates at the granularity of GPU steps and preserves the coupling between batch composition and service time, while remaining fast enough for large-scale Monte Carlo analysis.
+
+\paragraph{Technique.}
+The system state at step boundary $k$ is represented by population counts
+\[
+S_k = \big(H_k^{\mathrm{pf}},\, H_k^{\mathrm{dec}},\, Q_k\big),
+\]
+where $H_k^{\mathrm{pf}}$ and $H_k^{\mathrm{dec}}$ are histograms of admitted requests with remaining prefill steps and decode tokens, and $Q_k$ is an external admission queue. Transitions are defined deterministically by decrementing remaining work and stochastically by admitting new arrivals and injecting arrivals during step durations. Step durations $\Delta_k$ are computed using the BLIS execution law, yielding a discrete-time Markov chain whose transition structure is workload-invariant, but whose induced stationary distribution depends on workload parameters.
+
+% ------------------------------------------------------------
+\subsection*{4. Transferable multi-tier KV cache abstraction}
+
+\paragraph{Contribution.}
+We propose a transferable abstraction for modeling KV cache behavior that supports multiple cache tiers (GPU, CPU, storage) and captures the impact of prefix reuse on both execution cost and admission feasibility. This abstraction replaces explicit cache simulation with a compact statistical object that can be learned once and reused across workloads and queueing analyses.
+
+\paragraph{Technique.}
+We model cache behavior via a learned cache transfer function that maps reuse signals to tier outcomes. Concretely, for each workload class $c$, we estimate a reuse-distance distribution $F_c(d)$ over prefix keys. Given tier capacities $(C_{\mathrm{gpu}},C_{\mathrm{cpu}},C_{\mathrm{ssd}})$, tier hit probabilities are
+\[
+h^{\mathrm{gpu}}_c = F_c(C_{\mathrm{gpu}}),\quad
+h^{\mathrm{cpu}}_c = F_c(C_{\mathrm{gpu}}{+}C_{\mathrm{cpu}}) - F_c(C_{\mathrm{gpu}}),
+\]
+with analogous expressions for lower tiers and misses. On each request arrival, the cache abstraction samples a tier outcome, determines the uncached prefill tokens $P$, and applies tier-specific latency penalties. This object composes directly with the queueing model and enables fast exploration of cache-policy tradeoffs.
+
+% ------------------------------------------------------------
+\subsection*{5. Performance-sufficient workload model}
+
+\paragraph{Contribution.}
+We introduce a workload model that is sufficient for performance prediction in LLM serving systems, capturing not only request size distributions but also session structure, temporal locality, and workflow composition. The model is expressive enough to represent multi-turn chat, RAG pipelines, agentic loops, and tool calls, while remaining compact and measurable from real telemetry.
+
+\paragraph{Technique.}
+Workloads are modeled as populations of sessions, each generating a sequence of turns with inter-turn gaps measured in time. Each turn instantiates a workflow (e.g., chat, RAG, agent step) that emits one or more inference requests with conditional input/output token distributions. Prefix-key access streams are generated alongside requests, enabling cache reuse modeling. The workload is fully specified by a parameter vector
+\[
+w = (\lambda_{\mathrm{sess}},\, G_{\Delta},\, \pi_c,\, \mathcal{L}_c^{\mathrm{in}},\, \mathcal{L}_c^{\mathrm{out}},\, F_c),
+\]
+which can be estimated from lightweight client and server logs via a measurement-to-profile compilation pipeline.
+
+% ------------------------------------------------------------
+\subsection*{6. Tagged-request analysis for distributional latency prediction}
+
+\paragraph{Contribution.}
+We show how to recover request-level latency distributions---including tail metrics such as P95 and P99---from an aggregate queueing model using tagged-request analysis. This enables distribution-aware performance prediction without per-request simulation, a capability absent from prior inference modeling work.
+
+\paragraph{Technique.}
+During aggregate DTMC simulation, admitted requests lose identity and are represented only through population counts. To estimate request-level delays, we inject a small number of tagged requests that retain identity and evolve alongside the aggregate background. Tagged requests experience the same step durations and admission decisions as background traffic, but are tracked individually to measure time-to-admission, time-to-first-token, and completion latency. By repeating this process over many Monte Carlo runs, we obtain accurate latency distributions while preserving the computational efficiency of the aggregate model.
+
+
+\section{Experimental Design}
+\label{sec:experiments}
+
+We design experiments to validate both predictive accuracy and the qualitative insights enabled by our factorized model.
+Our evaluation focuses on three questions: fidelity, transferability, and insight.
+
+\subsection{Execution and cache fidelity}
+We first validate BLIS and the KV Cache Transfer Function against full-fidelity simulation and/or production measurements.
+We compare predicted and observed step times, effective uncached prefill tokens, and tier hit rates across multiple cache configurations and workload mixes.
+
+\subsection{Distributional latency prediction under workload shift}
+We evaluate the ability of our model to predict TTFT and end-to-end latency distributions under workload shift.
+Using execution and cache models learned once, we vary workload composition (e.g., chat vs.\ RAG vs.\ agentic), session length, and inter-turn gaps.
+We compare predicted and measured latency CDFs, with particular emphasis on P95 and P99 accuracy.
+
+\subsection{Cache and workload design-space exploration}
+We demonstrate that our model enables fast exploration of cache tier sizing and policy decisions.
+We sweep GPU, CPU, and storage KV capacities under fixed workloads, and sweep workload locality under fixed cache budgets.
+We show regime changes where naive metrics (e.g., hit ratio) fail to predict tail latency, while our model correctly identifies optimal operating points.
+
+\subsection{Performance and scalability}
+Finally, we compare runtime and scalability against full request-level simulation.
+We show orders-of-magnitude speedups that enable Monte Carlo analysis and interactive design-space exploration that are infeasible with existing simulators.
 
 
 % ============================================================
