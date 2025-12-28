@@ -1077,6 +1077,350 @@ This objective is convex and decoupled from server scheduling dynamics by
 construction, since all server-side queueing and interference are absorbed into
 $S_r^{\mathrm{trace}}$ and removed before fitting $\alpha$.
 
+\section{Applications: Enabling Principled Operational Decisions}
+\label{sec:applications}
+
+\subsection{Scope and perspective}
+
+Operators of LLM serving systems routinely make decisions about admission
+control, configuration, cache sizing, and safety guardrails.
+These decisions are driven by production realities---tail latency objectives,
+resource constraints, and evolving workloads---rather than by architectural
+boundaries such as ``single instance'' or ``multi-instance'' deployments.
+
+In this paper, we take the perspective that these operational decisions ultimately
+depend on understanding how load, locality, and configuration choices translate
+into latency \emph{within an inference instance}.
+While modern deployments may consist of many instances behind a routing layer,
+the execution, batching, and KV cache dynamics inside each instance determine the
+cost and risk associated with any such decision.
+Our goal is therefore not to model an entire serving fleet end-to-end, but to
+provide a principled and reusable foundation for reasoning about the performance
+implications of operator decisions at the level where execution and cache effects
+manifest.
+
+We intentionally scope this paper to modeling a single vLLM-style inference
+instance.
+This choice reflects a methodological boundary rather than an assumption about
+deployment architecture.
+A single instance already constitutes a complex distributed system, spanning
+multiple GPUs with tensor, expert, and data parallelism, a centralized scheduler,
+and a multi-tier KV cache.
+Accurately characterizing this layer is a necessary prerequisite for higher-level
+decisions such as cache-aware routing, replica selection, or fleet-wide
+optimization, which compose instance-level behavior and are left to future work.
+
+\subsection{Operational decisions enabled by our model}
+
+We now describe the operational decisions that our techniques enable.
+Each decision is framed from an operator’s perspective, independent of whether
+the deployment consists of one instance or many.
+
+\paragraph{Admission control and overload protection.}
+Operators must decide whether an incoming request can be safely admitted without
+violating tail-latency objectives.
+Existing admission policies rely on coarse signals such as queue length or GPU
+utilization, which fail to capture batching interference, decode tail effects,
+and KV cache pressure.
+By composing our execution model, queueing abstraction, and cache transfer
+function, we enable admission decisions that explicitly reason about the
+\emph{distributional latency impact} of additional load under current conditions.
+
+\paragraph{Configuration exploration and capacity planning.}
+Operators must configure inference instances by choosing parameters such as batch
+size limits, prefill chunk size, and KV cache tier allocations.
+These choices are highly workload dependent and interact in non-obvious ways.
+Our factorized model enables fast exploration of configuration alternatives under
+representative workload profiles, allowing operators to identify robust operating
+points without extensive simulation or risky production experiments.
+
+\paragraph{KV cache tier sizing and policy tuning.}
+Decisions about how to allocate KV cache capacity across GPU, CPU, and storage
+tiers are central to inference performance and cost.
+Naive metrics such as hit ratio obscure the interaction between cache behavior,
+batching, and tail latency.
+Our KV Cache Transfer Function enables principled evaluation of cache tier sizes
+and policies, revealing workload-dependent regimes and guiding cache investment
+decisions.
+
+\paragraph{Tail-latency guardrails and safety margins.}
+Operators often enforce guardrails such as limits on concurrent decode requests
+or outstanding tokens to prevent performance collapse.
+Designing these guardrails requires understanding how close the system is to
+instability under realistic workloads.
+Using tagged-request analysis, our model enables estimation of tail-latency risk
+under different guardrail settings, supporting more principled safety margins.
+
+\paragraph{Anticipating workload evolution.}
+Workloads evolve as applications adopt longer contexts, retrieval-augmented
+generation, or agentic workflows.
+Operators must anticipate the performance impact of such changes before they
+manifest in production.
+Our performance-sufficient workload model allows operators to adjust workload
+parameters and predict the resulting impact on latency distributions, enabling
+proactive planning rather than reactive mitigation.
+
+\subsection{Discussion}
+
+Taken together, these applications illustrate how instance-level performance
+models enable principled operational decision making.
+Although higher-level mechanisms such as cache-aware routing and fleet-wide
+optimization are outside the scope of this paper, our techniques provide the
+necessary building blocks by characterizing how execution, batching, and cache
+dynamics respond to load and configuration choices.
+We view integration with multi-instance routing and global control as a natural
+and important direction for future work.
+
+\section{Instance-Local Policy Exploration via a Sidecar}
+\label{sec:sidecar}
+
+\subsection{Motivation and placement}
+
+Operational LLM serving systems routinely deploy auxiliary components alongside
+the inference engine to implement control logic that is orthogonal to model
+execution.
+Examples include admission control, safety guardrails, request shaping, and
+workload-aware throttling.
+In containerized deployments, these controls are naturally implemented as a
+\emph{sidecar} colocated with the inference engine, enabling rapid iteration
+without modifying the engine’s core scheduling or execution logic.
+
+We adopt this architectural perspective in our evaluation.
+Rather than proposing a specific production sidecar implementation, we use the
+sidecar abstraction as a clean locus for instance-local policies that observe
+runtime signals and take control actions.
+Our goal is to demonstrate that the factorized performance model introduced in
+this paper enables principled \emph{offline exploration} and evaluation of such
+policies under realistic workloads and cache regimes, prior to deployment.
+
+\subsection{Policy interface}
+
+We model a sidecar policy as a mapping
+\[
+\pi : (s_k, r) \;\mapsto\; a,
+\]
+where $s_k$ denotes the observable state of the inference instance at step
+boundary $k$, $r$ denotes an arriving request, and $a$ is a control action.
+The observable state $s_k$ may include:
+(i) aggregate queue depth and tokens-in-flight;
+(ii) estimated step time or throughput derived from recent execution;
+(iii) cache pressure indicators or inferred tier residency probabilities;
+and (iv) workload descriptors such as request class or prompt length.
+The action $a$ may include:
+admit, delay, or reject the request; assign it a priority class; apply request
+shaping such as output token caps; or switch the instance into a predefined
+operating mode with different guardrails.
+
+This formulation intentionally abstracts away engine-specific mechanisms and
+focuses on the decision boundary that operators care about: how instance-local
+control actions affect latency, throughput, and tail behavior.
+
+\subsection{Offline policy evaluation using the factorized model}
+
+Our factorized performance model provides a natural evaluation engine for
+sidecar policies.
+Given a workload profile $w$, execution model $\mathcal{E}$, and cache transfer
+function $\mathcal{C}$, we evaluate a policy $\pi$ by embedding it into the
+aggregate step-indexed queueing model.
+
+Concretely, during simulation:
+when a request arrival event occurs, the policy $\pi(s_k, r)$ is invoked to
+determine the control action.
+Admitted requests are incorporated into the aggregate state and affect future
+step composition, cache pressure, and execution time.
+Rejected or delayed requests are accounted for in throughput and drop-rate
+metrics.
+Using tagged-request analysis, we recover request-level latency distributions
+under policy $\pi$, including tail metrics such as P95 and P99 TTFT and
+end-to-end latency.
+
+This evaluation loop enables rapid Monte Carlo analysis of candidate policies
+without re-running full-fidelity simulation or modifying the inference engine.
+
+\subsection{Policy families explored}
+
+To illustrate the utility of this approach, we explore several representative
+families of instance-local policies.
+
+\paragraph{Tail-risk–aware admission control.}
+Rather than admitting requests based on instantaneous load, this policy admits a
+request only if the predicted probability of violating a tail-latency SLO
+remains below a threshold:
+\[
+\Pr_{\pi}\!\left(\text{TTFT}_r > \tau \mid s_k \right) \le \epsilon.
+\]
+The probability is estimated using tagged-request Monte Carlo on the aggregate
+queueing model.
+This policy explicitly trades off goodput against tail-latency risk.
+
+\paragraph{Cache-aware admission and shaping.}
+Using the KV Cache Transfer Function, the sidecar estimates the likelihood that
+an arriving request will hit in different cache tiers.
+Under high load, the policy preferentially admits requests with high expected
+GPU-tier residency or applies stricter shaping (e.g., output caps) to requests
+likely to incur cache misses.
+This demonstrates how cache locality signals can be incorporated into instance-
+local control decisions without simulating cache internals.
+
+\paragraph{Decode-pressure guardrails.}
+This policy enforces dynamic limits on concurrent decode requests or total
+decode tokens-in-flight.
+Limits are adjusted based on observed step inflation and predicted tail impact,
+preventing decode-heavy workloads from destabilizing latency for other requests.
+
+\paragraph{Workload-aware operating modes.}
+The sidecar switches between predefined operating modes (e.g., ``chat-heavy''
+vs.\ ``RAG-heavy'') based on the observed workload mix.
+Each mode corresponds to different admission thresholds and guardrails.
+Our model enables evaluation of these mode switches under workload shift without
+production experimentation.
+
+\subsection{Discussion}
+
+The sidecar abstraction provides a practical bridge between performance modeling
+and operational control.
+Our contribution is not the design of a specific sidecar implementation, but a
+methodology for evaluating instance-local policies in a principled, fast, and
+distribution-aware manner.
+By decoupling policy logic from execution physics and cache dynamics, the
+factorized model enables operators to explore policy alternatives, quantify
+tail-latency risk, and select robust operating points prior to deployment.
+
+We view integration of such instance-local policies with higher-level mechanisms
+such as cache-aware routing and fleet-wide optimization as a natural extension of
+this work.
+
+\section{Policy Exploration Enabled by Factorized Performance Models}
+\label{sec:policy_results}
+
+This section demonstrates how the factorized performance model enables
+principled exploration of instance-local control policies.
+Our goal is not to advocate a specific production policy, but to show that
+accurate, distribution-aware performance modeling fundamentally expands the
+space of policies that operators can reason about and evaluate safely.
+All policies are evaluated offline using the aggregate step-indexed queueing
+model, the KV Cache Transfer Function, and tagged-request analysis.
+
+\subsection{Experimental setup}
+
+Unless otherwise stated, we consider a single vLLM-style inference instance
+serving a multi-turn conversational workload.
+The execution model (BLIS) and cache transfer function are learned once and held
+fixed across all experiments.
+Policies are evaluated under varying offered load, workload composition, and
+cache configurations.
+For each configuration, we report:
+(i) goodput (successfully completed requests per second),
+(ii) drop or delay rate,
+and (iii) distributional latency metrics, with emphasis on P95 and P99 TTFT.
+
+\subsection{Tail-risk–aware admission control}
+
+\paragraph{Policy definition.}
+Our first policy, \emph{Tail-Risk–Aware Admission Control} (TRAC), admits an
+incoming request $r$ only if the predicted probability of violating a tail
+latency SLO remains below a threshold:
+\[
+\text{admit}(r)
+=
+\mathbf{1}
+\left\{
+\widehat{\Pr}\!\left(\text{TTFT}_r > \tau \mid s_k \right) \le \epsilon
+\right\}.
+\]
+The probability is estimated using tagged-request Monte Carlo on the aggregate
+queueing model, conditioned on the current instance state $s_k$.
+
+\paragraph{Baselines.}
+We compare TRAC against two common baselines:
+(i) queue-length–based admission, which admits requests while the backlog
+remains below a fixed threshold; and
+(ii) token-budget admission, which caps the total number of tokens in flight.
+
+\paragraph{Results under overload.}
+Figure~\ref{fig:trac_frontier} plots goodput versus P99 TTFT as offered load
+increases beyond nominal capacity.
+Queue-length and token-budget policies exhibit a sharp collapse in tail latency
+once saturation is reached, while TRAC degrades gracefully.
+Across all overload levels, TRAC achieves strictly better goodput–tail tradeoffs,
+demonstrating that explicitly reasoning about distributional risk is superior to
+reacting to instantaneous load signals.
+
+\paragraph{Insight.}
+These results highlight a key benefit of our approach: tail latency is not a
+simple function of queue depth or utilization, but emerges from batching
+interference and decode dynamics.
+By making tail risk an explicit control signal, TRAC leverages information that
+is inaccessible to traditional admission heuristics.
+
+\subsection{Cache-aware admission and shaping}
+
+\paragraph{Policy definition.}
+Our second policy, \emph{Cache-Aware Admission and Shaping} (CASH), incorporates
+locality information via the KV Cache Transfer Function.
+For each arriving request $r$, the sidecar estimates the distribution of cache
+tier outcomes and the expected uncached prefill work.
+Under high load, the policy may:
+(i) admit the request unchanged,
+(ii) admit the request with output token caps,
+or (iii) defer or reject the request,
+based on an expected latency cost score:
+\[
+\text{score}(r)
+=
+\mathbb{E}[\Delta \text{TTFT}_r \mid \text{CTF}(r), s_k]
++
+\lambda \cdot \mathbb{E}[\Delta \text{interference} \mid s_k].
+\]
+
+\paragraph{Workload shift experiment.}
+We evaluate CASH under a workload shift from chat-heavy traffic (high prefix
+locality) to RAG-heavy traffic (larger prefills, lower reuse).
+Figure~\ref{fig:cash_shift} shows that policies oblivious to cache behavior suffer
+significant tail-latency inflation during the shift.
+In contrast, CASH maintains P99 TTFT within SLO while preserving higher goodput
+than TRAC alone by preferentially shaping or deferring cache-expensive requests.
+
+\paragraph{Insight.}
+This experiment illustrates why hit ratio alone is insufficient as a control
+signal.
+Two workloads with similar hit rates can impose very different cache pressure
+profiles and interference patterns.
+By abstracting cache behavior into a transferable statistical object, CASH makes
+locality actionable for control decisions.
+
+\subsection{Cache regime exploration}
+
+\paragraph{Cache tier sweep.}
+We next use CASH to explore cache tier configurations by sweeping GPU and CPU KV
+cache capacities while holding workload fixed.
+Figure~\ref{fig:cache_regimes} reveals multiple operating regimes.
+In some regimes, increasing GPU cache capacity reduces tail latency; in others,
+it increases batching interference and degrades P99 performance.
+
+\paragraph{Insight.}
+These results demonstrate that optimal cache allocation is workload dependent and
+non-monotonic.
+Our model enables operators to identify these regimes without exhaustive
+simulation or risky production experiments.
+
+\subsection{Discussion}
+
+Together, these experiments show that the factorized performance model enables a
+new class of instance-local policies that explicitly reason about tail latency,
+cache behavior, and workload structure.
+The policies we study are simple by design, yet already outperform common
+heuristics.
+More importantly, the evaluation methodology generalizes: richer policies can be
+explored using the same modeling stack without modifying the inference engine or
+running full-fidelity simulation.
+
+We emphasize that our contribution is not a specific control algorithm, but a
+principled framework for reasoning about and comparing instance-local policies.
+We believe this capability is essential for operating LLM inference systems
+safely and efficiently as workloads and cache hierarchies continue to evolve.
+
+
 \bibliographystyle{plain}
 \bibliography{blis}
 
