@@ -1420,6 +1420,340 @@ principled framework for reasoning about and comparing instance-local policies.
 We believe this capability is essential for operating LLM inference systems
 safely and efficiently as workloads and cache hierarchies continue to evolve.
 
+\appendix
+\section*{Appendix}
+
+\section{Experimental Plan and Reference Guide}
+\label{app:exp_plan}
+
+This appendix enumerates the complete experimental plan for the paper.
+The goal is to (i) validate fidelity of the factorized model (execution, cache,
+queueing), (ii) demonstrate transfer under workload and cache-policy shift, and
+(iii) showcase operator-facing applications (policy exploration) with
+best-paper-caliber ``killer'' plots.
+Unless otherwise stated, experiments target a single vLLM-style inference
+instance (potentially spanning multiple GPUs via TP/EP/DP) and report both mean
+and tail metrics (P95/P99), with particular emphasis on TTFT.
+
+\subsection{Common evaluation protocol}
+\label{app:exp_protocol}
+
+\paragraph{Workloads.}
+We will evaluate at least two representative workload families:
+(i) multi-turn chat (high prefix locality, decode-heavy tails) and
+(ii) RAG-heavy QA (prefill-heavy, lower locality due to retrieval diversity).
+Optionally, include an agentic workload case study (bursty request clusters with
+tool-induced inter-turn gaps).
+
+\paragraph{Metrics.}
+Report, at minimum:
+\begin{itemize}
+  \item \textbf{Latency:} TTFT and end-to-end (E2E) latency distributions;
+        P50/P95/P99 and full CDF overlays where possible.
+  \item \textbf{Throughput:} goodput (completed req/s), token throughput (tok/s).
+  \item \textbf{Stability:} saturation point, tail blow-up onset, queue growth rate.
+  \item \textbf{Cache:} tier hit rates (GPU/CPU/SSD), effective uncached prefill tokens,
+        spill traffic volume, and cache pressure indicators.
+  \item \textbf{Cost proxies (optional):} GPU memory reserved for KV, CPU memory usage,
+        storage I/O volume/latency.
+\end{itemize}
+
+\paragraph{Baselines.}
+We will compare against:
+\begin{itemize}
+  \item \textbf{Full simulator (ground truth):} BLIS full discrete-event simulator for the instance.
+  \item \textbf{Naive analytical baselines:} M/G/1 or GI/G/1 approximations using mean service times (used only as a sanity reference).
+  \item \textbf{Heuristic controls:} queue-length threshold admission, token-budget admission, static output caps.
+  \item \textbf{Ablations:} remove cache model, remove session structure, replace distributional risk with point estimates.
+\end{itemize}
+
+\paragraph{Experimental design principle.}
+Each experiment should include:
+(i) the independent variables (knobs),
+(ii) the dependent metrics,
+(iii) the expected qualitative phenomenon / hypothesis,
+and (iv) a plot or table template.
+
+% ============================================================
+\subsection{Model fidelity experiments}
+\label{app:exp_fidelity}
+
+\subsubsection{E1: BLIS execution physics fidelity (step-time law)}
+\paragraph{Goal.}
+Validate that the learned execution model predicts step runtimes accurately
+across batch compositions (prefill/decode mixtures), model sizes, and GPU types.
+
+\paragraph{Method.}
+Collect step-level execution measurements (or simulator truth) under controlled
+batch compositions:
+sweep $(T^{\mathrm{pf}}, T^{\mathrm{dec}})$ and measure $\Delta t$.
+Fit BLIS coefficients and compare predicted vs observed runtimes.
+
+\paragraph{Knobs.}
+Model type/size; GPU type; TP/EP/DP configuration; chunk size $C$;
+batch limit; prefill/decode mixing ratios.
+
+\paragraph{Plots/tables.}
+Scatter: predicted $\Delta t$ vs observed $\Delta t$ with $R^2$ and error bands.
+Heatmap: relative error over $(T^{\mathrm{pf}},T^{\mathrm{dec}})$ grid.
+
+\subsubsection{E2: Continuous EM trace-to-execution accuracy}
+\paragraph{Goal.}
+Validate that the continuous EM procedure recovers execution coefficients from
+phase-level trace windows without observing step boundaries.
+
+\paragraph{Method.}
+Generate synthetic traces with known step boundaries (from the simulator),
+discard step boundary information, run EM, and compare recovered $\beta_e$ to
+truth. Repeat across workloads and load regimes.
+
+\paragraph{Knobs.}
+Workload intensity; request size distributions; locality; trace noise level;
+kernel bandwidth $h$; partial-chunk correction enabled/disabled.
+
+\paragraph{Plots/tables.}
+Coefficient recovery error vs load; ablation table for EM components.
+
+\subsubsection{E3: Queueing model fidelity (background occupancy process)}
+\paragraph{Goal.}
+Validate that the aggregate step-indexed queueing model matches simulator
+background dynamics (occupancy and step composition).
+
+\paragraph{Method.}
+Run identical workload through full simulator and through queueing surrogate
+(using BLIS step-time law).
+Compare time series and distributions of $(n^{\mathrm{pf}}(t), n^{\mathrm{dec}}(t))$,
+tokens-in-flight, step durations, and queue backlog.
+
+\paragraph{Knobs.}
+Offered load; batch limits; decode-heavy vs prefill-heavy mixes.
+
+\paragraph{Plots/tables.}
+Time series overlays; distributional comparisons (KS distance) for occupancy and step time.
+
+% ============================================================
+\subsection{Cache abstraction fidelity and transfer}
+\label{app:exp_cache}
+
+\subsubsection{E4: KV Cache Transfer Function (CTF) fidelity within a regime}
+\paragraph{Goal.}
+Validate that the CTF predicts effective uncached prefill tokens and tier
+outcomes compared to simulator truth.
+
+\paragraph{Method.}
+For a fixed cache policy and tier sizes, generate workloads with known reuse
+structure. Compare predicted and observed:
+(i) GPU/CPU/SSD hit rates,
+(ii) effective uncached prefill tokens $P$ per request,
+(iii) spill volume and penalties.
+
+\paragraph{Knobs.}
+Tier capacities; eviction policy; locality strength; retrieval diversity; session length.
+
+\paragraph{Plots/tables.}
+Predicted vs observed tier hit rates; predicted vs observed distribution of effective $P$;
+error vs reuse-distance quantiles.
+
+\subsubsection{E5: CTF transfer across workloads (chat $\rightarrow$ RAG)}
+\paragraph{Goal.}
+Demonstrate that the CTF learned in one workload regime generalizes to shifted
+locality patterns when driven by the workload profile descriptors.
+
+\paragraph{Method.}
+Fit reuse-distance objects (or residence curves) for workload classes.
+Evaluate under workload shift without refitting cache internals; compare to
+simulator truth.
+
+\paragraph{Plots/tables.}
+Hit-rate and $P$ prediction error under shift; impact on TTFT predictions.
+
+\subsubsection{E6: Multi-tier regime map}
+\paragraph{Goal.}
+Reveal non-monotonic regimes in cache tier sizing (e.g., more GPU KV can worsen P99).
+
+\paragraph{Method.}
+Sweep $(C_{\mathrm{gpu}},C_{\mathrm{cpu}},C_{\mathrm{ssd}})$ across a grid.
+For each point, predict tail latency and throughput using surrogate; validate a
+subset with full simulation.
+
+\paragraph{Plots/tables.}
+Regime heatmap: P99 TTFT over cache capacity grid;
+Pareto front: P99 vs cost proxy (GPU KV reserved).
+
+% ============================================================
+\subsection{Workload model validation and shift}
+\label{app:exp_workload}
+
+\subsubsection{E7: Measurement-to-profile compilation fidelity}
+\paragraph{Goal.}
+Validate that the workload compiler reproduces performance-relevant signatures.
+
+\paragraph{Method.}
+From real logs or simulator-generated ground truth, estimate workload profile
+parameters $w$ (session arrivals, inter-turn gaps, class mixture, token laws,
+locality descriptors). Regenerate a synthetic workload from $w$ and compare
+signature statistics.
+
+\paragraph{Signature metrics.}
+Burstiness (index of dispersion); session length distribution; inter-turn gap CDF;
+conditional token distributions; reuse-distance CDFs by class.
+
+\paragraph{Plots/tables.}
+Signature overlay plots; divergence metrics (e.g., Wasserstein distance) for key distributions.
+
+\subsubsection{E8: Workload shift what-if prediction}
+\paragraph{Goal.}
+Demonstrate predictive power under hypothetical workload evolution.
+
+\paragraph{Method.}
+Starting from a baseline profile (chat-heavy), systematically shift:
+(i) mixture weights $\pi_c$,
+(ii) inter-turn gap distribution,
+(iii) retrieval diversity / locality parameters.
+Predict TTFT/E2E distributions and validate with simulator.
+
+\paragraph{Plots/tables.}
+CDF overlays for TTFT; predicted vs observed P99 across shift axis.
+
+% ============================================================
+\subsection{Policy exploration experiments (sidecar use-case)}
+\label{app:exp_policy}
+
+\subsubsection{E9: TRAC overload frontier (killer plot)}
+\paragraph{Goal.}
+Show that tail-risk–aware admission achieves a strictly better goodput--P99
+tradeoff than standard heuristics under overload.
+
+\paragraph{Method.}
+Sweep offered load from sub-saturation to overload.
+Evaluate policies:
+TRAC (risk threshold $\epsilon$), queue-length threshold, token-budget admission.
+For each, report goodput and P99 TTFT.
+
+\paragraph{Plots/tables.}
+Pareto frontier: goodput vs P99 TTFT (multiple load levels);
+SLO violation rate vs goodput.
+
+\subsubsection{E10: CASH under workload shift (killer plot)}
+\paragraph{Goal.}
+Show that cache-aware admission/shaping is robust to locality shift and
+outperforms cache-oblivious controls.
+
+\paragraph{Method.}
+Induce a shift from chat to RAG-heavy traffic while holding load fixed.
+Evaluate CASH vs TRAC vs baselines.
+Report tail metrics and goodput over time.
+
+\paragraph{Plots/tables.}
+Time series: P99 TTFT and goodput during shift; CDF overlays pre/post shift.
+
+\subsubsection{E11: Policy--cache interaction regime study}
+\paragraph{Goal.}
+Show that policy effectiveness depends on cache tier sizing and locality regimes,
+and that the model can identify robust policies.
+
+\paragraph{Method.}
+Repeat E9/E10 across a cache tier grid (subset) and across multiple locality regimes.
+Compare policy ranking stability.
+
+\paragraph{Plots/tables.}
+Policy ranking heatmap over cache regimes; robustness table.
+
+\subsubsection{E12 (optional): Decode-pressure guardrail ablation}
+\paragraph{Goal.}
+Isolate decode interference as a tail amplifier and validate that dynamic decode
+guardrails reduce tail blow-ups.
+
+\paragraph{Method.}
+Add dynamic cap on concurrent decodes/tokens-in-flight; compare to static caps.
+
+\paragraph{Plots/tables.}
+Tail latency vs overload with/without guardrail; step inflation diagnostics.
+
+% ============================================================
+\subsection{End-to-end transfer and efficiency}
+\label{app:exp_transfer_efficiency}
+
+\subsubsection{E13: Zero-shot environment transfer}
+\paragraph{Goal.}
+Validate feature-based transfer of execution physics to a new environment.
+
+\paragraph{Method.}
+Train global execution map $B$ on a subset of environments.
+Evaluate on held-out environment $e^\star$ with different GPU or model configuration.
+Compare predicted $\beta_{e^\star}$ and induced latency predictions.
+Optionally include local NNLS recalibration with small trace data.
+
+\paragraph{Plots/tables.}
+Prediction error vs number of trace samples; zero-shot vs recalibration.
+
+\subsubsection{E14: Runtime and scalability}
+\paragraph{Goal.}
+Quantify speedup and scalability relative to full simulation.
+
+\paragraph{Method.}
+Compare wall-clock time to evaluate:
+(i) a single workload/config point,
+(ii) a cache-tier sweep,
+(iii) a policy sweep.
+Report speedups and amortized cost per evaluation.
+
+\paragraph{Plots/tables.}
+Runtime bars; scaling with horizon length and concurrency; cost-per-MC-sample.
+
+% ============================================================
+\subsection{Ablations and sensitivity analyses}
+\label{app:exp_ablations}
+
+\subsubsection{E15: Component ablations}
+\paragraph{Goal.}
+Demonstrate that each factorized component contributes materially to accuracy.
+
+\paragraph{Ablations.}
+\begin{itemize}
+  \item Remove cache transfer function (assume no prefix reuse).
+  \item Remove session structure (i.i.d.\ requests).
+  \item Replace distributional risk with mean-only estimates.
+  \item Disable partial prefill chunk correction in EM.
+  \item Replace step-indexed queueing with coarse M/G/1 approximation.
+\end{itemize}
+
+\paragraph{Plots/tables.}
+Accuracy degradation table for P95/P99 TTFT and goodput; qualitative failure cases.
+
+\subsubsection{E16: Sensitivity to modeling choices}
+\paragraph{Goal.}
+Assess robustness to hyperparameters and modeling assumptions.
+
+\paragraph{Knobs.}
+EM kernel bandwidth $h$; trace timestamp noise; discretization granularity;
+CTF object choice (reuse-distance vs residence curve); workload profile smoothing.
+
+\paragraph{Plots/tables.}
+Sensitivity curves: error vs hyperparameter; stability regions.
+
+\subsection{Checklist: ``Best paper'' figures to prioritize}
+\label{app:bestpaper_figs}
+
+We prioritize the following figures as ``must-have'' for a best-paper-level story:
+\begin{itemize}
+  \item \textbf{F1 (killer):} Goodput vs P99 TTFT frontier under overload (TRAC vs baselines).
+  \item \textbf{F2 (killer):} P99 TTFT over time under workload shift (CASH vs TRAC vs baselines).
+  \item \textbf{F3 (signature):} Cache regime map showing non-monotonic P99 behavior over tier capacities.
+  \item \textbf{F4 (credibility):} Predicted vs observed TTFT CDF overlays (multiple workloads/configs).
+  \item \textbf{F5 (efficiency):} Speedup/runtime comparison enabling design-space exploration.
+\end{itemize}
+
+\subsection{Reproducibility notes}
+\label{app:repro_notes}
+
+For each experiment, we will log all workload profile parameters, cache
+configuration, execution model coefficients, policy thresholds, random seeds, and
+simulation horizon.
+All reported distributions will include confidence intervals over repeated Monte
+Carlo runs.
+We will publish scripts to regenerate all plots from saved experiment manifests.
+
 
 \bibliographystyle{plain}
 \bibliography{blis}
