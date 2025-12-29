@@ -1423,6 +1423,160 @@ safely and efficiently as workloads and cache hierarchies continue to evolve.
 \appendix
 \section*{Appendix}
 
+\section{Observability}
+\label{sec:observability}
+
+% ============================================================
+\subsection{MVP Trace Observability and Enabled Models}
+\label{subsec:trace_mvp}
+
+We first describe a minimal yet expressive trace instrumentation---the
+\emph{MVP trace schema}---that unlocks a wide range of execution, queueing, and
+memory-tiering models while keeping tracing overhead manageable.
+The design assumes three logical event streams: \emph{request}, \emph{swap}, and
+\emph{step}.
+Crucially, the MVP schema enables explicit modeling of asynchronous KV
+swap-in/out, batching dynamics, and parallelism effects (tensor parallelism,
+data parallelism, and MoE), without requiring full per-step or per-rank
+instrumentation.
+
+\paragraph{Request stream (required).}
+For each inference request $r$, the request stream records:
+\begin{itemize}
+  \item A unique request identifier and environment identifier.
+  \item Static descriptors: input/output token counts
+        $(\nu_r^{\mathrm{in}},\nu_r^{\mathrm{out}})$, uncached prefill tokens
+        $P_r$, decode tokens $D_r$, and the effective prefill chunk size $C$.
+  \item Lifecycle events with wall-clock timestamps (and, when available, the
+        current global step index):
+        \begin{align*}
+        & \textsf{arrival} \rightarrow
+        \textsf{enqueue} \rightarrow
+        \textsf{admit} \rightarrow
+        \textsf{KV\_ready} \rightarrow \\
+        & \textsf{prefill\_start} \rightarrow
+        \textsf{prefill\_end} \rightarrow
+        \textsf{decode\_start} \rightarrow
+        \textsf{decode\_end} \rightarrow
+        \textsf{depart}.
+        \end{align*}
+  \item A coarse blocking reason whenever the request is not schedulable
+        (e.g., waiting for KV swap-in, batch-size limits, or policy delay).
+\end{itemize}
+
+The explicit \textsf{KV\_ready} marker separates queueing delays caused by memory
+tiering from those caused by scheduling or batching, which is essential for
+identifying the impact of KV offloading.
+
+\paragraph{Swap stream (required, possibly sampled).}
+Each KV swap event $j$ (CPU$\leftrightarrow$GPU transfer) records:
+\begin{itemize}
+  \item Associated request identifier (or background/global swap).
+  \item Direction (swap-in or swap-out).
+  \item Bytes or KV blocks transferred.
+  \item Start and end timestamps (and step indices if available).
+  \item A coarse reason code (demand-driven, eviction, prefetch).
+\end{itemize}
+Swap events are asynchronous and may overlap with compute.
+Even if swap tracing is sampled, these records enable estimation of transfer
+latency as a function of data volume and contention, and allow swap-induced
+schedulability delays to be modeled explicitly rather than absorbed into compute
+coefficients.
+
+\paragraph{Step stream (required, possibly sampled).}
+For each busy-loop iteration (step) $k$ on a replica, the step stream records:
+\begin{itemize}
+  \item Step start/end timestamps and step index.
+  \item Aggregate batch descriptors:
+        total prefill tokens $T_k^{\mathrm{pf}}$, total decode tokens
+        $T_k^{\mathrm{dec}}$, and counts of active prefill/decode requests.
+  \item Parallelism descriptors: data-parallel replica id and tensor-parallel
+        rank (or rank aggregates if per-rank logging is infeasible).
+  \item Coarse communication statistics, when applicable (e.g., bytes or time
+        spent in TP all-reduce or MoE all-to-all).
+\end{itemize}
+
+Step-level instrumentation need not be exhaustive: periodic or probabilistic
+sampling of steps is sufficient to learn step-time models, provided timestamps
+remain aligned to the same monotonic clock as the request and swap streams.
+
+\paragraph{What the MVP schema unlocks.}
+Together, these three streams enable:
+\begin{itemize}
+  \item Separation of \emph{queueing}, \emph{KV-gated waiting}, and
+        \emph{execution} delays at the request level.
+  \item Estimation of step-time models as functions of prefill/decode token work,
+        with optional additive effects from communication and swap overlap.
+  \item Explicit modeling of asynchronous KV tiering (CPU$\leftrightarrow$GPU)
+        as a gating mechanism rather than hidden noise.
+  \item Support for tensor parallelism, data parallelism, and MoE by conditioning
+        step times on aggregate communication and expert-routing statistics.
+\end{itemize}
+
+This MVP observability strikes a balance between overhead and fidelity: it avoids
+full per-token or per-rank tracing, yet is sufficient to parameterize accurate
+and transferable inference simulations.
+
+% ============================================================
+\subsection{Extended Trace Observability and Advanced Modeling}
+\label{subsec:trace_extended}
+
+We now describe an extended trace schema that augments the MVP instrumentation
+with finer-grained signals.
+While more expensive, this richer observability enables higher-fidelity models
+of interference, imbalance, and tail latency, and is particularly valuable for
+debugging and for research studies.
+
+\paragraph{Extended step-level observability.}
+In addition to MVP step records, the extended schema may include:
+\begin{itemize}
+  \item Per-rank step timings within a replica (min/mean/max or full vectors).
+  \item Exact batch membership per step (request ids and per-request token
+        contributions).
+  \item Fine-grained GPU utilization metrics (SM occupancy, HBM bandwidth).
+\end{itemize}
+These signals enable explicit modeling of stragglers, tensor-parallel imbalance,
+and compute--communication overlap, and allow the latent-step EM formulation to
+be replaced by direct step-aligned accounting.
+
+\paragraph{Extended swap-level observability.}
+Richer swap tracing may record:
+\begin{itemize}
+  \item Queueing delays prior to swap execution.
+  \item Transfer paths (PCIe vs.\ NVLink, pinned vs.\ pageable memory).
+  \item Layer ranges or KV block identifiers involved in each swap.
+\end{itemize}
+This enables detailed bandwidth-sharing models, NUMA-aware transfer costs, and
+prediction of swap interference under high memory pressure.
+
+\paragraph{Extended MoE and parallelism signals.}
+For MoE and sharded deployments, extended traces may include:
+\begin{itemize}
+  \item Per-layer expert routing statistics (tokens per expert, load imbalance).
+  \item Cross-rank communication volumes attributable specifically to MoE
+        dispatch and gather.
+  \item Expert placement metadata mapping experts to ranks and devices.
+\end{itemize}
+These features unlock models of expert imbalance, expert-local cache pressure,
+and MoE-induced tail amplification that are not identifiable from aggregate
+statistics alone.
+
+\paragraph{Sampling considerations.}
+Both step and swap streams may be sampled to control overhead.
+The modeling framework tolerates missing observations as long as sampling is
+unbiased with respect to time or load.
+In practice, sparse step sampling combined with complete request lifecycle
+events is sufficient for stable estimation, while denser sampling can be
+reserved for targeted experiments.
+
+\paragraph{Summary.}
+The extended trace schema generalizes the MVP observability by making
+interference, imbalance, and memory behavior explicit.
+While not required for routine deployment modeling, it enables deeper analysis
+of pathological workloads, advanced scheduling policies, and next-generation
+memory hierarchies.
+
+
 \section{Experimental Plan and Reference Guide}
 \label{app:exp_plan}
 
