@@ -86,6 +86,7 @@
 
 \maketitle
 
+<<<<<<< HEAD
 \section{BLIS Design: Policy-Faithful Simulation Under Partial Observability}
 \label{sec:blis-design}
 
@@ -325,6 +326,167 @@ KV offload events & 5--20\% \\
 \bottomrule
 \end{tabular}
 \end{center}
+=======
+% ============================================================
+\section{Observability-Driven, Factorized Inference Performance Modeling}
+\label{sec:framing}
+
+Modern LLM inference engines are complex, highly dynamic systems.
+Execution latency emerges from the interaction of batching, queueing,
+GPU compute, communication, and increasingly, multi-tier memory
+management (e.g., KV cache offloading).
+While several simulators have been proposed for modeling inference
+performance, most rely on idealized execution assumptions or detailed
+engine internals that are difficult to observe in production.
+
+This paper takes a different perspective.
+Rather than asking how to simulate an inference engine in full detail,
+we ask:
+
+\begin{quote}
+\emph{What performance mechanisms can be reliably identified from
+realistic, deployable observability—and how far can such models go in
+supporting operator decisions?}
+\end{quote}
+
+Our central thesis is that a carefully chosen set of trace signals,
+available in production systems, is sufficient to \emph{factorize}
+inference performance into interpretable components and to build
+high-fidelity, transferable performance models.
+This factorization—not simulator complexity—is the key enabler for
+accurate capacity planning and what-if analysis.
+
+\paragraph{Observability as the modeling constraint.}
+Production inference systems expose limited and imperfect information.
+Busy-loop step boundaries, per-step runtimes, and instantaneous batch
+composition are typically unobservable.
+Memory movement (e.g., KV swap-in/out) is asynchronous and overlaps with
+compute.
+Parallelism (tensor parallelism, data parallelism, and MoE) further
+obscures causal attribution of latency.
+
+Rather than treating these limitations as noise to be ignored, we make
+them first-class constraints.
+Our modeling approach is explicitly designed around what can be
+measured:
+request lifecycle events, coarse step timing, and asynchronous memory
+transfers.
+Where mechanisms are latent, we introduce structured latent variables
+and infer them using trace-driven estimation.
+
+\paragraph{Factorization of inference latency.}
+Using this observability-first approach, we decompose end-to-end
+inference latency into separable components:
+\begin{itemize}
+  \item request queueing and admission delay,
+  \item KV-residency–gated waiting (due to memory tiering),
+  \item step-level execution time driven by prefill and decode token
+        workloads,
+  \item communication overheads induced by parallelism (TP, DP, MoE),
+  \item and asynchronous background activity such as KV swap-in/out.
+\end{itemize}
+
+Each component is modeled independently but coupled through shared
+latent structure.
+This factorization yields models that are interpretable, identifiable
+from traces, and robust to changes in workload mix, memory pressure,
+and parallelism configuration.
+
+\paragraph{Why simulators alone are insufficient.}
+Existing inference simulators typically encode fixed execution models
+and rely on replaying assumptions about batching, memory behavior, or
+parallelism.
+As a result, they often provide reasonable latency estimates near the
+regime in which they were calibrated, but fail to predict performance
+under regime shifts—precisely the scenarios faced by operators during
+capacity planning.
+
+In contrast, our approach learns execution and interference behavior
+directly from observed traces, enabling it to:
+(i) generalize across environments,
+(ii) identify which subsystem becomes the bottleneck as load changes,
+and
+(iii) support counterfactual analysis without re-instrumenting the
+engine.
+
+\paragraph{Capacity planning as a flagship application.}
+We focus on capacity planning as a primary application of factorized
+inference modeling.
+Capacity planning requires accurate prediction not only of mean
+latency, but of \emph{how bottlenecks move} as resources, arrival rates,
+or memory configurations change.
+Errors in modeling KV residency, batching saturation, or parallelism
+effects can lead to qualitatively incorrect provisioning decisions.
+
+We show that observability-driven, factorized models can predict these
+regime changes with substantially higher fidelity than existing
+simulators, enabling operators to reason about GPU count, memory tier
+sizes, and offloading policies with confidence.
+
+\paragraph{Summary.}
+This paper argues that accurate inference performance modeling is not a
+question of simulator detail, but of identifiability under realistic
+observability.
+By grounding our models in deployable trace signals and explicitly
+factorizing latency mechanisms, we enable high-fidelity prediction and
+actionable capacity planning for modern LLM inference systems.
+
+% ============================================================
+\section{(Author Notes) Experiments to Consider}
+\label{sec:experiments_todo}
+
+This section outlines candidate experiments used to evaluate modeling
+fidelity and capacity planning accuracy.
+It is intended as an internal planning guide and may be removed or
+condensed in the final version of the paper.
+
+\paragraph{Simulator comparison under load scaling.}
+Compare BLIS against existing inference simulators (e.g., Vidur) under
+increasing arrival rates for a fixed workload.
+Measure:
+(i) predicted versus observed p50/p95 latency,
+(ii) predicted saturation points,
+and
+(iii) inferred bottleneck transitions (compute-bound to memory-bound).
+
+\paragraph{KV tiering stress test.}
+Fix arrival rate and workload, and vary available GPU KV cache capacity.
+Evaluate each simulator’s ability to predict:
+(i) onset of swap-induced waiting,
+(ii) throughput collapse,
+and
+(iii) latency variance.
+Demonstrate that models without explicit KV-gating systematically
+misattribute these effects.
+
+\paragraph{Capacity planning decision error.}
+Concrete example: given a target SLA and workload, evaluate how many
+GPUs are required according to each model.
+For instance, a simulator may predict that 16 GPUs suffice, while
+observed performance violates SLA due to KV thrashing or batching
+effects.
+BLIS should correctly predict both the violation and its root cause.
+
+\paragraph{Parallelism sensitivity.}
+Vary tensor parallelism degree and MoE configuration while holding total
+compute constant.
+Evaluate whether each model correctly predicts:
+(i) communication-dominated regimes,
+(ii) MoE imbalance effects,
+and
+(iii) resulting tail latency changes.
+
+\paragraph{Ablation on observability.}
+Systematically remove trace signals (e.g., swap events, step sampling)
+and quantify degradation in prediction accuracy.
+This experiment directly supports the observability-driven framing of
+the paper.
+
+\paragraph{Outcome.}
+These experiments are designed to demonstrate not only improved
+accuracy, but improved \emph{decision quality} for operators using the
+model for capacity planning.
+>>>>>>> main
 
 
 \section{Front matter -- placeholder}
