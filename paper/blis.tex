@@ -86,6 +86,247 @@
 
 \maketitle
 
+<<<<<<< HEAD
+\section{BLIS Design: Policy-Faithful Simulation Under Partial Observability}
+\label{sec:blis-design}
+
+BLIS is a high-fidelity request-level simulator and performance estimation engine for modern LLM inference systems such as vLLM. It is designed to operate under realistic production constraints, where observability is sparse, sampling rates are low, and algorithms continue to evolve.
+
+The core challenge BLIS addresses is the following:
+\emph{How can we faithfully simulate request journeys and system performance when only sparse, sampled observations are available, and when scheduling and memory-management algorithms may change over time?}
+
+BLIS resolves this challenge through three tightly coupled design principles:
+\begin{enumerate}
+  \item A strict separation between \emph{pluggable policies}, \emph{fixed constraints}, and \emph{learnable mechanisms}.
+  \item An explicit treatment of observability as a \emph{sampling process}, not as a requirement for full tracing.
+  \item A simulator-centric learning formulation that admits latent micro-decisions while remaining policy-faithful.
+\end{enumerate}
+
+\subsection{Pluggable Policies, Fixed Constraints, and Learnable Mechanisms}
+\label{subsec:pcm}
+
+BLIS decomposes inference serving behavior into three orthogonal components with distinct responsibilities.
+
+\paragraph{Policies (explicit and pluggable).}
+Policies encode \emph{intent}: how the system decides what to do. They are implemented directly in code and are never learned.
+
+Policy modules include:
+\begin{itemize}
+  \item \textbf{Admission and ordering policies}: FIFO, priority-based, or hybrid request queues.
+  \item \textbf{RUNNING-set selection}: deterministic scan-order selection among runnable requests subject to per-step token and sequence budgets.
+  \item \textbf{Preemption policies}: victim selection under KV allocation failure or memory pressure (e.g., tail of RUNNING list, lowest priority).
+  \item \textbf{KV cache policies}: block allocation strategy, free-list ordering, eviction rules, prefix reuse, and watermark behavior.
+  \item \textbf{Offload policies}: swap-in and swap-out triggers, retry semantics, and concurrency limits.
+\end{itemize}
+
+Importantly, BLIS does not learn request selection behavior. Selection is fixed by policy, mirroring the inference engine’s control logic. This ensures that BLIS remains faithful to the intended scheduler semantics and can be used to evaluate new policies without retraining.
+
+\paragraph{Constraints (fixed invariants).}
+Constraints encode what is physically or logically impossible and must never be violated. These include:
+\begin{itemize}
+  \item Per-step token and sequence budgets.
+  \item KV cache capacity and residency requirements.
+  \item Phase ordering constraints (prefill must precede decode).
+  \item Swap-in completion before a request becomes eligible for execution.
+  \item Legal request state transitions.
+\end{itemize}
+
+Constraints sharply restrict the simulator’s state space and prevent invalid executions. Violating a constraint indicates an incorrect model, not approximation error.
+
+\paragraph{Mechanisms (learnable).}
+Mechanisms map policy decisions to time and resource consumption. These capture hardware- and implementation-dependent effects and are therefore learned.
+
+BLIS learns:
+\begin{itemize}
+  \item \textbf{Scheduler step time}: wall-clock duration as a function of executed prefill tokens, decode tokens, number of active sequences, and KV operations.
+  \item \textbf{KV transfer time}: swap-in and swap-out latency as a function of transferred bytes or blocks.
+  \item \textbf{Overlap behavior}: degree to which communication overlaps with compute.
+\end{itemize}
+
+Mechanism learning generalizes across workloads and model families (dense LLMs, MoE models, diffusion-style iterative decoding), while retraining is permitted for new hardware environments.
+
+\subsection{Tracing, Sampling, and Partial Observability}
+\label{subsec:sampling}
+
+BLIS is explicitly designed for environments where tracing is disabled or heavily sampled in steady-state production.
+
+\paragraph{Three complementary trace streams.}
+BLIS relies on three trace streams, each resolving a different ambiguity:
+
+\begin{itemize}
+  \item \textbf{Request journey events}: sparse lifecycle boundary events (e.g., QUEUED, SCHEDULED, PREEMPTED, FIRST\_TOKEN, FINISHED) with scheduler step indices, phase, and progress counters. These anchor request-level structure, queueing delays, and preemption behavior.
+  \item \textbf{Sampled scheduler step summaries}: compact batch-level records for a sampled subset of steps, including step wall-time and batch features (prefill tokens, decode tokens, active sequences). These supervise execution-time mechanisms.
+  \item \textbf{KV offload events}: start and completion timestamps for swap-in and swap-out operations, including transferred size. These eliminate ambiguity around preemption cost and memory-induced stalls.
+\end{itemize}
+
+No single stream is sufficient alone. Together, they provide enough information to identify mechanism parameters while leaving fine-grained scheduling choices intentionally latent.
+
+\paragraph{Observability as a sampling process.}
+Each trace stream is treated as a sampled view of an underlying population:
+\begin{itemize}
+  \item scheduler steps,
+  \item KV transfer operations,
+  \item request lifecycle transitions.
+\end{itemize}
+
+Each emitted record carries (or can reconstruct) its inclusion probability. Sampling affects what is observed, not how the system behaves.
+
+BLIS therefore separates:
+\begin{itemize}
+  \item the \emph{simulator}, which models true system behavior, and
+  \item the \emph{estimator}, which learns mechanism parameters from sampled data.
+\end{itemize}
+
+Learning uses inverse-probability weighting to correct for sampling bias.
+
+\paragraph{Latent variables are intentional.}
+Even with these traces, certain micro-level decisions remain unobserved, such as which RUNNING requests are selected on a particular unsampled step. BLIS treats these as constrained latent variables:
+\begin{itemize}
+  \item constrained by policies,
+  \item bounded by request progress,
+  \item anchored by observed batch execution and timing.
+\end{itemize}
+
+This avoids the need for per-request-per-step tracing while preserving fidelity.
+
+\subsection{Learning, Calibration, and Online Adaptation}
+\label{subsec:learning}
+
+\paragraph{Cold-start learning in new environments.}
+When BLIS is deployed to a new environment (new model family or configuration), a short calibration phase is sufficient:
+\begin{itemize}
+  \item observability is enabled at modest sampling rates,
+  \item journey traces validate policy faithfulness,
+  \item sampled step summaries and KV events fit mechanism parameters.
+\end{itemize}
+
+Because only low-dimensional mechanism models are learned, convergence requires relatively little data.
+
+\paragraph{Steady-state operation.}
+After calibration, tracing can be reduced to near-zero. BLIS continues to simulate production behavior using the learned parameters, while trickle-sampled observations are used for monitoring.
+
+\paragraph{Online and continual learning (future).}
+BLIS’s design naturally supports safe online adaptation:
+\begin{itemize}
+  \item mechanism parameters can be updated incrementally using weighted stochastic updates,
+  \item update rates can be bounded to ensure stability,
+  \item observability itself can be made adaptive, increasing sampling when drift is detected.
+\end{itemize}
+
+Crucially, no learned component ever affects live scheduling or memory-management decisions.
+
+\paragraph{Summary.}
+By separating policies, constraints, and mechanisms, and by explicitly modeling observability and latent micro-decisions, BLIS enables faithful simulation and performance estimation under realistic production constraints, while remaining extensible to future algorithmic evolution.
+
+\subsection{Sampling Design for Multi-Stream Tracing}
+\label{subsec:sampling-design}
+
+BLIS is explicitly designed to operate under partial observability, where tracing is either disabled or enabled at low sampling rates in steady-state production. Crucially, \emph{all tracing streams may be sampled}, but they must be sampled \emph{differently}, reflecting their distinct roles in identifiability and learning.
+
+The key principle guiding BLIS’s sampling design is:
+\begin{quote}
+\emph{Always observe structure; sample behavior.}
+\end{quote}
+
+\subsubsection{Request Journey Events: Structural Backbone}
+
+Request journey events capture sparse lifecycle boundaries for each request (e.g., QUEUED, SCHEDULED, PREEMPTED, FIRST\_TOKEN, FINISHED), along with scheduler step indices, phase, and progress counters.
+
+\paragraph{Role.}
+These events define the \emph{structural skeleton} of request execution:
+\begin{itemize}
+  \item request lifetimes and queueing delays,
+  \item preemption counts and resume points,
+  \item phase transitions (prefill vs decode),
+  \item cumulative work completed at each boundary.
+\end{itemize}
+
+Journey events eliminate large classes of ambiguity in request-level simulation. Without them, it is impossible to reliably reconstruct request journeys or preemption behavior.
+
+\paragraph{Sampling policy.}
+Journey events are low volume (O(requests)) and high semantic value. Sampling them introduces structural ambiguity that is difficult to recover statistically.
+
+\textbf{Recommendation:}
+\begin{itemize}
+  \item keep journey tracing always on when possible, or
+  \item apply very light, per-request sampling (e.g., 1--5\%).
+\end{itemize}
+
+In BLIS, journey tracing is treated as control-plane telemetry and is not a performance bottleneck.
+
+\subsubsection{Scheduler Step and Batch-Level Statistics: Behavioral Supervision}
+
+Scheduler step traces provide batch-level summaries for individual scheduler iterations, such as step wall-time, number of active sequences, prefill tokens, and decode tokens.
+
+\paragraph{Role.}
+These traces do \emph{not} define request structure or correctness. Instead, they supervise learnable \emph{mechanisms}:
+\begin{itemize}
+  \item execution time as a function of batch shape,
+  \item contention effects under different workloads,
+  \item throughput-latency tradeoffs.
+\end{itemize}
+
+They answer the question:
+\begin{quote}
+\emph{Given this batch shape, how long did the system take?}
+\end{quote}
+
+\paragraph{Sampling policy.}
+Step-level tracing is a firehose (O(steps)) and must be sampled aggressively. Missing steps increase estimator variance but do not introduce structural ambiguity.
+
+\textbf{Recommendation:}
+\begin{itemize}
+  \item uniform step sampling (e.g., 0.1--1\%), or
+  \item adaptive sampling (e.g., oversample slow or anomalous steps).
+\end{itemize}
+
+BLIS treats sampled steps as IID draws from the underlying step distribution and corrects for sampling via inverse-probability weighting.
+
+\subsubsection{KV Offload and Transfer Events: Bottleneck Resolution}
+
+KV offload events record initiation and completion of swap-in and swap-out operations, along with transferred size or block counts.
+
+\paragraph{Role.}
+These events resolve a critical latent ambiguity: whether observed delays are due to compute, memory pressure, or communication. Without them, preemption cost and swap-induced stalls must be inferred indirectly, significantly degrading accuracy.
+
+\paragraph{Sampling policy.}
+KV events are moderate in volume but high impact. Sampling is acceptable provided that temporal integrity is preserved.
+
+\textbf{Recommendation:}
+\begin{itemize}
+  \item sample at a moderate rate (e.g., 5--20\%),
+  \item ensure start and completion events are sampled together,
+  \item record sampling probabilities explicitly.
+\end{itemize}
+
+\subsubsection{Sampling as an Estimation Problem, Not a Simulation Constraint}
+
+A central design choice in BLIS is the separation of simulation from estimation.
+
+\begin{itemize}
+  \item The simulator is deterministic, policy-faithful, and constraint-driven.
+  \item The estimator is statistical, sampling-aware, and noise-tolerant.
+\end{itemize}
+
+Sampling affects learning efficiency, not simulator correctness. Latent micro-decisions (e.g., which RUNNING requests are selected on unsampled steps) are bounded by explicit policies and anchored by journey events and sampled batch observations.
+
+\paragraph{Implication.}
+BLIS can be calibrated in new production environments using low sampling rates, after which tracing can be reduced further without sacrificing simulation fidelity.
+
+\paragraph{Default configuration.}
+A practical starting point is:
+\begin{center}
+\begin{tabular}{l c}
+\toprule
+\textbf{Trace stream} & \textbf{Typical sampling rate} \\
+\midrule
+Request journey events & On or $\geq$1\% \\
+Scheduler step stats & 0.1--1\% \\
+KV offload events & 5--20\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+=======
 % ============================================================
 \section{Observability-Driven, Factorized Inference Performance Modeling}
 \label{sec:framing}
@@ -245,6 +486,7 @@ the paper.
 These experiments are designed to demonstrate not only improved
 accuracy, but improved \emph{decision quality} for operators using the
 model for capacity planning.
+>>>>>>> main
 
 
 \section{Front matter -- placeholder}
