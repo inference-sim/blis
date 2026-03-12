@@ -1,12 +1,409 @@
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
+% ============================================================
+% LLM INFERENCE SERVING SYSTEMS
+% ============================================================
+
+@inproceedings{kwon2023vllm,
+  title={Efficient Memory Management for Large Language Model Serving with {PagedAttention}},
+  author={Kwon, Woosuk and Li, Zhuohan and Zhuang, Siyuan and Sheng, Ying and Zheng, Lianmin and Yu, Cody Hao and Gonzalez, Joseph E. and Zhang, Hao and Stoica, Ion},
+  booktitle={Proceedings of the 29th ACM Symposium on Operating Systems Principles (SOSP)},
   year={2023}
 }
 
+@inproceedings{yu2022orca,
+  title={Orca: A Distributed Serving System for Transformer-Based Generative Models},
+  author={Yu, Gyeong-In and Jeong, Joo Seong and Kim, Geon-Woo and Kim, Soojeong and Chun, Byung-Gon},
+  booktitle={Proceedings of the 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year={2022}
+}
+
+@inproceedings{zhong2024distserve,
+  title={{DistServe}: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving},
+  author={Zhong, Yinmin and Liu, Shengyu and Chen, Junda and Hu, Jianbo and Zhu, Yibo and Liu, Xuanzhe and Jin, Xin and Zhang, Hao},
+  booktitle={Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year={2024}
+}
+
+@inproceedings{patel2024splitwise,
+  title={Splitwise: Efficient Generative {LLM} Inference Using Phase Splitting},
+  author={Patel, Pratyush and Choukse, Esha and Zhang, Chaojie and Shah, Aashaka and Goiri, \'{I}\~{n}igo and Maleki, Saeed and Bianchini, Ricardo},
+  booktitle={Proceedings of the 51st International Symposium on Computer Architecture (ISCA)},
+  year={2024}
+}
+
+@article{agrawal2023sarathi,
+  title={{SARATHI}: Efficient {LLM} Inference by Piggybacking Decodes with Chunked Prefills},
+  author={Agrawal, Amey and Panwar, Ashish and Mohan, Jayashree and Kwatra, Nipun and Gulavani, Bhargav S. and Ramjee, Ramachandran},
+  journal={arXiv preprint arXiv:2308.16369},
+  year={2023}
+}
+
+@article{agrawal2024sarathiserve,
+  title={Taming Throughput-Latency Tradeoff in {LLM} Inference with {Sarathi-Serve}},
+  author={Agrawal, Amey and Kedia, Nitin and Panwar, Ashish and Mohan, Jayashree and Kwatra, Nipun and Gulavani, Bhargav S. and Tumanov, Alexey and Ramjee, Ramachandran},
+  journal={arXiv preprint arXiv:2403.02310},
+  year={2024}
+}
+
+@article{zheng2023sglang,
+  title={{SGLang}: Efficient Execution of Structured Language Model Programs},
+  author={Zheng, Lianmin and Yin, Liangsheng and Xie, Zhiqiang and Sun, Chuyue and Huang, Jeff and Yu, Cody Hao and Cao, Shiyi and Kozyrakis, Christos and Stoica, Ion and Gonzalez, Joseph E. and Barrett, Clark and Sheng, Ying},
+  journal={arXiv preprint arXiv:2312.07104},
+  year={2023}
+}
+
+@article{qin2024mooncake,
+  title={Mooncake: A {KVCache}-Centric Disaggregated Architecture for {LLM} Serving},
+  author={Qin, Ruoyu and Li, Zheming and He, Weiran and Zhang, Mingxing and Wu, Yongwei and Zheng, Weimin and Xu, Xinran},
+  journal={arXiv preprint arXiv:2407.00079},
+  year={2024}
+}
+
+@article{wu2023fastserve,
+  title={Fast Distributed Inference Serving for Large Language Models},
+  author={Wu, Bingyang and Zhong, Yinmin and Zhang, Zili and Liu, Shengyu and Liu, Fangyue and Sun, Yuanhang and Huang, Gang and Liu, Xuanzhe and Jin, Xin},
+  journal={arXiv preprint arXiv:2305.05920},
+  year={2023}
+}
+
+@inproceedings{li2023alpaserve,
+  title={{AlpaServe}: Statistical Multiplexing with Model Parallelism for Deep Learning Serving},
+  author={Li, Zhuohan and Zheng, Lianmin and Zhong, Yinmin and Liu, Vincent and Sheng, Ying and Jin, Xin and Huang, Yanping and Chen, Zhifeng and Zhang, Hao and Gonzalez, Joseph E. and Stoica, Ion},
+  booktitle={Proceedings of the 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year={2023}
+}
+
+@article{hu2024memserve,
+  title={{MemServe}: Context Caching for Disaggregated {LLM} Serving with Elastic Memory Pool},
+  author={Hu, Cunchen and Huang, Heyang and Hu, Junhao and Xu, Jiang and Chen, Xusheng and Xie, Tao and Wang, Chenxi and Wang, Sa and Bao, Yungang and Sun, Ninghui and Shan, Yizhou},
+  journal={arXiv preprint arXiv:2406.17565},
+  year={2024}
+}
+
+@article{wu2024loongserve,
+  title={{LoongServe}: Efficiently Serving Long-Context Large Language Models with Elastic Sequence Parallelism},
+  author={Wu, Bingyang and Liu, Shengyu and Zhong, Yinmin and Sun, Peng and Liu, Xuanzhe and Jin, Xin},
+  journal={arXiv preprint arXiv:2404.09526},
+  year={2024}
+}
+
+@article{fu2024serverlessllm,
+  title={{ServerlessLLM}: Low-Latency Serverless Inference for Large Language Models},
+  author={Fu, Yao and Xue, Leyang and Huang, Yeqi and Brabete, Andrei-Octavian and Ustiugov, Dmitrii and Patel, Yuvraj and Mai, Luo},
+  booktitle={Proceedings of the 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI)},
+  year={2024}
+}
+
+% ============================================================
+% LLM INFERENCE SIMULATORS AND PERFORMANCE PREDICTION
+% ============================================================
+
+@article{agrawal2024vidur,
+  title={Vidur: A Large-Scale Simulation Framework for {LLM} Inference},
+  author={Agrawal, Amey and Kedia, Nitin and Mohan, Jayashree and Panwar, Ashish and Kwatra, Nipun and Gulavani, Bhargav and Ramjee, Ramachandran and Tumanov, Alexey},
+  journal={arXiv preprint arXiv:2405.05465},
+  year={2024}
+}
+
+@misc{alibaba2025infersim,
+  title={{InferSim}: A Lightweight Simulator for {LLM} Inference Performance},
+  author={{Alimama AI Infra Team and Future Living Lab, Alibaba Group}},
+  howpublished={\url{https://github.com/alibaba/InferSim}},
+  year={2025},
+  note={Pure-Python analytical simulator based on kernel benchmarks (MFU, FLOPs, bandwidth); predicts TTFT, TPOT, and throughput for model-system co-design}
+}
+
+@inproceedings{qin2025phantora,
+  title={Phantora: Maximizing Code Reuse in Simulation-based Machine Learning System Performance Estimation},
+  author={Qin, Jianxing and Chen, Jingrong and Kong, Xinhao and Wu, Yongji and Yuan, Tianjun and Luo, Liang and Wang, Zhaodong and Zhang, Ying and Chen, Tingjun and Lebeck, Alvin R. and Zhuo, Danyang},
+  booktitle={Proceedings of the 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year={2026}
+}
+
+@inproceedings{won2023astrasim2,
+  title={{ASTRA-sim2.0}: Modeling Hierarchical Networks and Disaggregated Systems for Large-Model Training at Scale},
+  author={Won, William and Heo, Taekyung and Rashidi, Saeed and Sridharan, Srinivas and Srinivasan, Sudarshan and Krishna, Tushar},
+  booktitle={Proceedings of the IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)},
+  year={2023}
+}
+
+@article{yuan2024llminference,
+  title={{LLM} Inference Unveiled: Survey and Roofline Model Insights},
+  author={Yuan, Zhihang and Shang, Yuzhang and Zhou, Yang and Dong, Zhen and Zhou, Zhe and Xue, Chenhao and Wu, Bingzhe and Li, Zhikai and Gu, Qingyi and Lee, Yong Jae and Yan, Yan and Chen, Beidi and Sun, Guangyu and Keutzer, Kurt},
+  journal={arXiv preprint arXiv:2402.16363},
+  year={2024}
+}
+
+@article{li2024llmservingsurvey,
+  title={{LLM} Inference Serving: Survey of Recent Advances and Opportunities},
+  author={Li, Baolin and Jiang, Yankai and Gadepally, Vijay and Tiwari, Devesh},
+  journal={arXiv preprint arXiv:2407.12391},
+  year={2024}
+}
+
+@article{zhou2024efficientinference,
+  title={A Survey on Efficient Inference for Large Language Models},
+  author={Zhou, Zixuan and Ning, Xuefei and Hong, Ke and Fu, Tianyu and Xu, Jiaming and Li, Shiyao and Lou, Yuming and Wang, Luning and Yuan, Zhihang and Li, Xiuhong and Yan, Shengen and Dai, Guohao and Zhang, Xiao-Ping and Dong, Yuhan and Wang, Yu},
+  journal={arXiv preprint arXiv:2404.14294},
+  year={2024}
+}
+
+@article{narayanan2023cheaply,
+  title={Cheaply Evaluating Inference Efficiency Metrics for Autoregressive Transformer {APIs}},
+  author={Narayanan, Deepak and Santhanam, Keshav and Henderson, Peter and Bommasani, Rishi and Lee, Tony and Liang, Percy},
+  journal={arXiv preprint arXiv:2305.02440},
+  year={2023}
+}
+
+% ============================================================
+% WORKLOAD CHARACTERIZATION AND GENERATION
+% ============================================================
+
+@article{xiang2025servegen,
+  title={{ServeGen}: Workload Characterization and Generation of Large Language Model Serving in Production},
+  author={Xiang, Yuxing and Li, Xue and Qian, Kun and Yu, Wenyuan and Zhai, Ennan and Jin, Xin},
+  journal={arXiv preprint arXiv:2505.09999},
+  year={2025}
+}
+
+% ============================================================
+% CAPACITY PLANNING AND CONFIGURATION OPTIMIZATION
+% ============================================================
+
+% Note: BentoML and NVIDIA AI Configurator are industry tools without
+% peer-reviewed publications as of 2025. We cite them as software.
+
+@misc{bentoml2024,
+  title={{BentoML}: Build, Ship, and Scale {AI} Applications},
+  author={{BentoML Inc.}},
+  howpublished={\url{https://github.com/bentoml/BentoML}},
+  year={2024},
+  note={Open-source framework for AI application deployment with built-in optimization for LLM serving}
+}
+
+@misc{nvidia2024tensorrtllm,
+  title={{TensorRT-LLM}: A {TensorRT} Toolbox for Optimized Large Language Model Inference},
+  author={{NVIDIA Corporation}},
+  howpublished={\url{https://github.com/NVIDIA/TensorRT-LLM}},
+  year={2024},
+  note={Includes inference configuration optimization with FP8/NVFP4 quantization, paged KV caching, and multi-GPU parallelism}
+}
+
+@misc{nvidia2024nim,
+  title={{NVIDIA NIM}: Inference Microservices for Accelerated {AI} Deployment},
+  author={{NVIDIA Corporation}},
+  howpublished={\url{https://developer.nvidia.com/nim}},
+  year={2024},
+  note={Managed inference microservices with automatic configuration selection for GPU deployments}
+}
+
+% ============================================================
+% KV CACHE OPTIMIZATION
+% ============================================================
+
+@inproceedings{liu2024cachegen,
+  title={{CacheGen}: {KV} Cache Compression and Streaming for Fast Large Language Model Serving},
+  author={Liu, Yuhan and Li, Hanchen and Cheng, Yihua and Ray, Siddhant and Huang, Yuyang and Zhang, Qizheng and Du, Kuntai and Yao, Jiayi and Lu, Shan and Ananthanarayanan, Ganesh and Maire, Michael and Hoffmann, Henry and Holtzman, Ari and Jiang, Junchen},
+  booktitle={Proceedings of ACM SIGCOMM},
+  year={2024}
+}
+
+@inproceedings{tang2024quest,
+  title={{Quest}: Query-Aware Sparsity for Efficient Long-Context {LLM} Inference},
+  author={Tang, Jiaming and Zhao, Yilong and Zhu, Kan and Xiao, Guangxuan and Kasikci, Baris and Han, Song},
+  booktitle={Proceedings of the 41st International Conference on Machine Learning (ICML)},
+  year={2024}
+}
+
+% ============================================================
+% DISAGGREGATED AND DISTRIBUTED INFERENCE
+% ============================================================
+
+@misc{llmd2024,
+  title={{llm-d}: A High-Performance Distributed Inference Serving Stack for {Kubernetes}},
+  author={{llm-d Community}},
+  howpublished={\url{https://github.com/llm-d/llm-d}},
+  year={2024},
+  note={Orchestrates vLLM with intelligent routing, disaggregated prefill/decode, tiered KV caching, and multi-workload autoscaling}
+}
+
+% ============================================================
+% MULTI-ADAPTER AND MULTI-TENANT SERVING
+% ============================================================
+
+@article{sheng2023slora,
+  title={{S-LoRA}: Serving Thousands of Concurrent {LoRA} Adapters},
+  author={Sheng, Ying and Cao, Shiyi and Li, Dacheng and Hooper, Coleman and Lee, Nicholas and Yang, Shuo and Chou, Christopher and Zhu, Banghua and Zheng, Lianmin and Keutzer, Kurt and Gonzalez, Joseph E. and Stoica, Ion},
+  journal={arXiv preprint arXiv:2311.03285},
+  year={2023}
+}
+
+@article{chen2023punica,
+  title={Punica: Multi-Tenant {LoRA} Serving},
+  author={Chen, Lequn and Ye, Zihao and Wu, Yongji and Zhuo, Danyang and Ceze, Luis and Krishnamurthy, Arvind},
+  journal={arXiv preprint arXiv:2310.18547},
+  year={2023}
+}
+
+% ============================================================
+% MEMORY-EFFICIENT INFERENCE
+% ============================================================
+
+@article{sheng2023flexgen,
+  title={{FlexGen}: High-Throughput Generative Inference of Large Language Models with a Single {GPU}},
+  author={Sheng, Ying and Zheng, Lianmin and Yuan, Binhang and Li, Zhuohan and Ryabinin, Max and Fu, Daniel Y. and Xie, Zhiqiang and Chen, Beidi and Barrett, Clark and Gonzalez, Joseph E. and Liang, Percy and R\'{e}, Christopher and Stoica, Ion and Zhang, Ce},
+  journal={arXiv preprint arXiv:2303.06865},
+  year={2023}
+}
+
+@article{jin2023s3,
+  title={{S\textsuperscript{3}}: Increasing {GPU} Utilization during Generative Inference for Higher Throughput},
+  author={Jin, Yunho and Wu, Chun-Feng and Brooks, David and Wei, Gu-Yeon},
+  journal={arXiv preprint arXiv:2306.06000},
+  year={2023}
+}
+
+% ============================================================
+% AUGMENTED AND AGENTIC LLM INFERENCE
+% ============================================================
+
+@article{abhyankar2024infercept,
+  title={{InferCept}: Efficient Intercept Support for Augmented Large Language Model Inference},
+  author={Abhyankar, Reyna and He, Zijian and Srivatsa, Vikranth and Zhang, Hao and Zhang, Yiying},
+  journal={arXiv preprint arXiv:2402.01869},
+  year={2024}
+}
+
+% ============================================================
+% LARGE-SCALE TRAINING (FOR MODEL ARCHITECTURE CONTEXT)
+% ============================================================
+
+@inproceedings{narayanan2021megatron,
+  title={Efficient Large-Scale Language Model Training on {GPU} Clusters Using {Megatron-LM}},
+  author={Narayanan, Deepak and Shoeybi, Mohammad and Casper, Jared and LeGresley, Patrick and Patwary, Mostofa and Korthikanti, Vijay Anand and Vainbrand, Dmitri and Kashinkunti, Prethvi and Bernauer, Julie and Catanzaro, Bryan and Phanishayee, Amar and Zaharia, Matei},
+  booktitle={Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC)},
+  year={2021}
+}
+
+% ============================================================
+% MODEL ARCHITECTURES (FOR EVALUATION CONTEXT)
+% ============================================================
+
+@article{touvron2023llama,
+  title={{LLaMA}: Open and Efficient Foundation Language Models},
+  author={Touvron, Hugo and Lavril, Thibaut and Izacard, Gautier and Martinet, Xavier and Lachaux, Marie-Anne and Lacroix, Timoth\'{e}e and Rozi\`{e}re, Baptiste and Goyal, Naman and Hambro, Eric and Azhar, Faisal and Rodriguez, Aurelien and Joulin, Armand and Grave, Edouard and Lample, Guillaume},
+  journal={arXiv preprint arXiv:2302.13971},
+  year={2023}
+}
+
+@article{touvron2023llama2,
+  title={{Llama 2}: Open Foundation and Fine-Tuned Chat Models},
+  author={Touvron, Hugo and Martin, Louis and Stone, Kevin and Albert, Peter and Almahairi, Amjad and Babaei, Yasmine and Bashlykov, Nikolay and Batra, Soumya and Bhargava, Prajjwal and Bhosale, Shruti and others},
+  journal={arXiv preprint arXiv:2307.09288},
+  year={2023}
+}
+
+@article{jiang2024mixtral,
+  title={Mixtral of Experts},
+  author={Jiang, Albert Q. and Sablayrolles, Alexandre and Roux, Antoine and Mensch, Arthur and Savary, Blanche and Bamford, Chris and Chaplot, Devendra Singh and de las Casas, Diego and Hanna, Emma Bou and Bressand, Florian and others},
+  journal={arXiv preprint arXiv:2401.04088},
+  year={2024}
+}
+
+@article{ainslie2023gqa,
+  title={{GQA}: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints},
+  author={Ainslie, Joshua and Lee-Thorp, James and de Jong, Michiel and Zemlyanskiy, Yury and Lebr\'{o}n, Federico and Sanghai, Sumit},
+  booktitle={Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year={2023}
+}
+
+% ============================================================
+% ROOFLINE AND PERFORMANCE MODELING
+% ============================================================
+
+@article{williams2009roofline,
+  title={Roofline: An Insightful Visual Performance Model for Multicore Architectures},
+  author={Williams, Samuel and Waterman, Andrew and Patterson, David},
+  journal={Communications of the ACM},
+  volume={52},
+  number={4},
+  pages={65--76},
+  year={2009}
+}
+
+% ============================================================
+% AI-NATIVE SYSTEMS AND ALGORITHM EVOLUTION
+% ============================================================
+
+@article{romeraparedes2024funsearch,
+  title={Mathematical Discoveries from Program Search with Large Language Models},
+  author={Romera-Paredes, Bernardino and Barekatain, Amin and Novikov, Alexander and Balog, Matej and Mudigonda, Pawan Kumar and Dupont, Emilien and Ruiz, Francisco J. R. and Ellenberg, Jordan S. and Wang, Pengming and Fawzi, Omar and Holland, George and Kohli, Pushmeet and Fawzi, Alhussein},
+  journal={Nature},
+  volume={625},
+  pages={468--475},
+  year={2024}
+}
+
+@inproceedings{chen2024evoprompting,
+  title={{EvoPrompting}: Language Models for Code-Level Neural Architecture Search},
+  author={Chen, Angelica and Dohan, David and So, David},
+  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},
+  year={2023}
+}
+
+@inproceedings{lehman2023evolution,
+  title={Evolution through Large Models},
+  author={Lehman, Joel and Gordon, Jonathan and Jain, Shyamal and Ndousse, Kamal and Yeh, Cathy and Stanley, Kenneth O.},
+  booktitle={Proceedings of the Genetic and Evolutionary Computation Conference (GECCO)},
+  year={2023}
+}
+
+% ============================================================
+% DISCRETE-EVENT SIMULATION
+% ============================================================
+
+@book{banks2010des,
+  title={Discrete-Event System Simulation},
+  author={Banks, Jerry and Carson, John S. and Nelson, Barry L. and Nicol, David M.},
+  edition={5th},
+  publisher={Prentice Hall},
+  year={2010}
+}
+
+@book{law2015simulation,
+  title={Simulation Modeling and Analysis},
+  author={Law, Averill M.},
+  edition={5th},
+  publisher={McGraw-Hill Education},
+  year={2015}
+}
+
+% ============================================================
+% QUEUEING THEORY AND PERFORMANCE ANALYSIS
+% ============================================================
+
+@book{harchol2013performance,
+  title={Performance Modeling and Design of Computer Systems: Queueing Theory in Action},
+  author={Harchol-Balter, Mor},
+  publisher={Cambridge University Press},
+  year={2013}
+}
+
+@article{gandhi2014exact,
+  title={Exact Analysis of the {M/M/k/setup} Class of Markov Chains via Recursive Renewal Reward},
+  author={Gandhi, Anshul and Doroudi, Sherwin and Harchol-Balter, Mor and Scheller-Wolf, Alan},
+  journal={Queueing Systems},
+  volume={77},
+  number={2},
+  pages={177--209},
+  year={2014}
+}
+
+% ============================================================
+% STATISTICAL METHODOLOGY (USED IN TRAINING PIPELINE)
+% ============================================================
+
 @article{dempster1977em,
-  title={Maximum likelihood from incomplete data via the EM algorithm},
+  title={Maximum Likelihood from Incomplete Data via the {EM} Algorithm},
   author={Dempster, Arthur P. and Laird, Nan M. and Rubin, Donald B.},
   journal={Journal of the Royal Statistical Society: Series B},
   volume={39},
@@ -15,12 +412,46 @@
   year={1977}
 }
 
-@article{wu1983convergence,
-  title={On the convergence properties of the EM algorithm},
-  author={Wu, C. F. Jeff},
-  journal={The Annals of Statistics},
-  volume={11},
-  number={1},
-  pages={95--103},
-  year={1983}
+@article{lawson1995nnls,
+  title={Solving Least Squares Problems},
+  author={Lawson, Charles L. and Hanson, Richard J.},
+  publisher={Society for Industrial and Applied Mathematics},
+  year={1995},
+  note={Classic reference for non-negative least squares (NNLS)}
+}
+
+% ============================================================
+% BENCHMARK AND EVALUATION TOOLS
+% ============================================================
+
+@misc{inferenceperf2024,
+  title={{inference-perf}: A Benchmarking Framework for {LLM} Inference on {Kubernetes}},
+  author={{Kubernetes SIGs}},
+  howpublished={\url{https://github.com/kubernetes-sigs/inference-perf}},
+  year={2024}
+}
+
+% ============================================================
+% BEST PAPERS FROM SYSTEMS CONFERENCES (CONTEXTUAL)
+% ============================================================
+
+@inproceedings{wei2026dmtree,
+  title={{DMTree}: Efficient Tree Indexing on Disaggregated Memory},
+  author={Wei, Xinjing and others},
+  booktitle={Proceedings of the 24th USENIX Conference on File and Storage Technologies (FAST)},
+  year={2026}
+}
+
+@inproceedings{li2025ndd,
+  title={Network Decision Diagram: Enabling Efficient Network Verification},
+  author={Li, Zechun and others},
+  booktitle={Proceedings of the 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year={2025}
+}
+
+@inproceedings{sentosa2025cellreplay,
+  title={{CellReplay}: Accurate Record-and-Replay for Cellular Networks},
+  author={Sentosa, Francis and others},
+  booktitle={Proceedings of the 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI)},
+  year={2025}
 }
