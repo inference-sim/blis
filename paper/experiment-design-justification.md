@@ -1,6 +1,6 @@
 # Why These ~50 Experiments?
 
-BLIS predicts LLM inference latency without GPUs. These experiments validate that prediction across the configurations production operators actually deploy.
+BLIS predicts LLM inference latency without GPUs. These experiments validate that prediction across the configurations production operators actually deploy. Full experiment matrix: [Discussion #598](https://github.com/inference-sim/inference-sim/discussions/598).
 
 ---
 
