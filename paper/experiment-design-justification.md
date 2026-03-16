@@ -40,7 +40,7 @@ Three GPUs = three distinct (bandwidth × interconnect) classes. Adding H200 or 
 
 ### Workloads (4) — from ServeGen traffic profiles
 
-These four workloads are drawn from [ServeGen](https://arxiv.org/abs/2401.09056) traffic profiles, each representing a structurally distinct serving regime:
+These four workloads are drawn from [ServeGen](https://github.com/alibaba/ServeGen) traffic profiles, each representing a structurally distinct serving regime:
 
 | Workload | Input | Output | Traffic pattern | What it stresses |
 |---|---|---|---|---|
