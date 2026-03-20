@@ -377,32 +377,630 @@ We demonstrate this capability concretely through the ADRS (Automated Design of 
 \section{BLIS: Blackbox Inference Simulator}
 \label{sec:design}
 
-(To be written: factorized architecture---learned execution physics, pluggable policies, fixed constraints.)
+Serving a large language model requires reasoning simultaneously about GPU execution
+physics, cluster-wide control-plane decisions, and time-varying workload behavior.
+In a running system these concerns are entangled: a routing policy change reshapes
+KV-cache hit rates, which alters batch composition, which changes step time.
+Yet they are \emph{analytically separable}, and that separation is the design center
+of BLIS.
 
+\paragraph{Design principle.}
+BLIS factorizes inference simulation into three independent, swappable axes
+(Figure~\ref{fig:blis-arch}):
+(1)~\emph{learned execution physics}---one of four interchangeable latency-model
+backends predicts how long a batch step takes;
+(2)~\emph{pluggable control-plane policies}---admission, routing, scheduling, and
+memory management replicate the deterministic serving logic faithfully in software,
+without GPUs;
+and~(3)~\emph{composable workload models}---a declarative specification generates
+realistic request streams without a live deployment.
+Any axis can be replaced without touching the other two.
+This factorization makes BLIS \emph{portable} (no engine source code required),
+\emph{accurate} (7\% MAPE in step-time prediction across four architectures,
+\S\ref{subsubsec:training}), and \emph{fast} (a 1{,}000-request simulation
+completes in under two seconds on a commodity CPU).
+
+The simulation core is a deterministic discrete-event simulator (DES) with a
+priority event queue ordered by \emph{(timestamp, event type, sequence ID)}.
+This ordering delivers two properties operators need from a fitness function:
+\textbf{reproducibility}---identical seeds produce byte-identical outputs, enabling
+repeatable algorithm search---and \textbf{conservation}---every injected request
+is accounted for as completed, queued, running, or dropped, eliminating simulator
+artifact from throughput measurements.
+
+% --------------------------------------------------------------------------
 \subsection{Architecture Overview}
 \label{subsec:design-arch}
+
+Figure~\ref{fig:blis-arch} shows the full BLIS architecture.
+A \code{WorkloadSpec} drives a generator that emits a time-ordered request stream;
+requests enter the cluster simulator, which applies admission control, routes each
+request to one of $N$ instance simulators, and collects per-request metrics at
+completion.
+Each instance simulator runs its own DES loop: at every \emph{step} it orders its
+wait queue via a pluggable \code{InstanceScheduler}, forms a batch via
+\code{BatchFormation}, allocates KV blocks via \code{KVStore}, and advances the
+clock by the step duration from \code{LatencyModel}.
+The cluster layer introduces \textsc{Admission} and \textsc{Routing} event types
+that fire before any instance sees a request, so cluster-level policy decisions
+can be recorded, replayed, and swapped independently of per-instance execution.
+
+% ---- Figure A: BLIS Architecture ----
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  comp/.style={draw, rounded corners=3pt, fill=white,
+               minimum width=2.05cm, minimum height=0.50cm,
+               align=center, font=\footnotesize, inner sep=2pt},
+  plug/.style={draw=gray!55, rounded corners=3pt, fill=white, dashed,
+               minimum width=2.05cm, minimum height=0.50cm,
+               align=center, font=\footnotesize, inner sep=2pt},
+  hdr/.style={font=\small\bfseries, align=center},
+  arr/.style={->, >=Stealth, semithick},
+  darr/.style={->, >=Stealth, semithick, dashed, green!50!black},
+]
+%% Background colour bands
+\fill[blue!5,   rounded corners=4pt] (-1.35,-2.55) rectangle (1.55, 0.95);
+\fill[orange!5, rounded corners=4pt] (1.70,-2.55)  rectangle (10.05,0.95);
+\fill[green!5,  rounded corners=4pt] (10.20,-2.55) rectangle (13.45,0.95);
+
+%% Column headers
+\node[hdr, blue!65!black]   at (0.10, 1.25) {Workload\\Model};
+\node[hdr, orange!70!black] at (5.87, 1.25) {Control-Plane Policies \emph{(pluggable)}};
+\node[hdr, green!55!black]  at (11.82,1.25) {Execution\\Physics};
+
+%% ---- Workload column (x≈0.10) ----
+\node[comp, fill=blue!12]     (ws)  at (0.10, 0.52) {\textbf{WorkloadSpec}};
+\node[comp, fill=blue!5]            at (0.10,-0.08) {arrival process};
+\node[comp, fill=blue!5]            at (0.10,-0.60) {token distribution};
+\node[comp, fill=blue!5]            at (0.10,-1.12) {SLO class};
+\node[comp, fill=blue!5]            at (0.10,-1.64) {cohort dynamics};
+
+%% ---- Admission column (x≈3.10) ----
+\node[comp, fill=orange!14]   (adm) at (3.10, 0.52) {Admission};
+\node[plug]                         at (3.10,-0.08) {AlwaysAdmit};
+\node[plug]                         at (3.10,-0.60) {TokenBucket};
+
+%% ---- Router column (x≈5.87) ----
+\node[comp, fill=orange!14]   (rtr) at (5.87, 0.52) {Router};
+\node[plug, text width=3.0cm, align=center, font=\tiny, inner sep=3pt]
+     at (5.87,-0.42) {prefix-affinity \\ queue-depth \\ kv-utilization \\ load-balance};
+\node[font=\tiny, gray]             at (5.87,-1.22) {weighted composite scorer};
+
+%% ---- Instance column (x≈8.64) ----
+\node[comp, fill=orange!14, minimum width=2.40cm] (inst) at (8.64, 0.52)
+      {Instance ${\times}\,N$};
+\node[comp, fill=orange!5]    at (8.64,-0.08) {Scheduler};
+\node[comp, fill=orange!5]    at (8.64,-0.60) {Batch formation};
+\node[comp, fill=orange!5]    at (8.64,-1.12) {KV Store};
+\node[plug, fill=green!8]    (lm) at (8.64,-1.64) {Latency Model $\leftarrow$};
+
+%% ---- Physics column (x≈11.82) ----
+\node[plug]                        at (11.82, 0.52) {Blackbox};
+\node[plug]                        at (11.82,-0.08) {Roofline};
+\node[plug]                        at (11.82,-0.60) {Cross-model};
+\node[plug, thick, fill=green!18] (tr) at (11.82,-1.12) {\textbf{Trained-roofline}};
+\node[font=\tiny, gray, align=center] at (11.82,-1.72)
+      {$\leftarrow$ no data\hspace{1.6em}data-efficient $\rightarrow$};
+
+%% ---- Metrics bar ----
+\node[comp, fill=gray!12, minimum width=5.0cm] (met)
+      at (5.87,-2.18) {Metrics:\enspace TTFT\enspace TPOT\enspace E2E\enspace SLO};
+
+%% ---- Arrows ----
+\draw[arr] (ws.east)   -- node[above,font=\tiny]{requests} (adm.west);
+\draw[arr] (adm.east)  -- (rtr.west);
+\draw[arr] (rtr.east)  -- (inst.west);
+\draw[darr] (tr.west)  -- ++(-0.45,0) |- (lm.east);
+\draw[arr]  (inst)     -- ++(0,-0.38) -| (met);
+\end{tikzpicture}
+\caption{\textbf{BLIS architecture.}
+  Three swappable axes: workload model, control-plane policies (dashed borders =
+  pluggable implementations), and execution physics.
+  Requests flow left to right through admission, routing, and instance simulation to
+  metrics.
+  The latency model (green) is selected from four backends spanning the
+  data-availability spectrum; the trained-roofline backend (\S\ref{subsubsec:trained-roofline})
+  achieves 7\% MAPE with 13 production traces.}
+\label{fig:blis-arch}
+\end{figure*}
+
+% --------------------------------------------------------------------------
 \subsection{Learned Execution Physics}
 \label{subsec:design-latency}
-\subsubsection{The Trained-Roofline Latency Model}
+
+Step-time error dominates end-to-end prediction error.
+A simulator that misestimates batch step durations propagates that error into
+every downstream quantity it computes: queue wait times accumulate over step
+boundaries, so a 10\% step-time overestimate inflates TTFT, TPOT, and tail-latency
+predictions by the same factor.
+BLIS offers four latency-model backends, from a zero-data analytical bound to a
+data-efficient learned model, all behind a uniform four-method interface
+(step time, queueing time, post-decode overhead, per-token processing time).
+
+% ---- Figure B: Roofline to Trained-Roofline ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[scale=0.92]
+%% ---- (a) Roofline chart ----
+\begin{scope}
+  \draw[->] (0,0) -- (4.6,0)
+            node[right, font=\scriptsize] {Arith.\ intensity (FLOP/B)};
+  \draw[->] (0,0) -- (0,3.4)
+            node[above, font=\scriptsize] {Perf.\ (FLOP/s)};
+
+  % Memory-bandwidth slope
+  \draw[thick, blue!60!black] (0,0) -- (2.2, 2.75);
+  \node[font=\tiny, blue!60!black, rotate=51] at (0.75,1.05) {peak BW};
+
+  % Peak-compute ceiling
+  \draw[thick, blue!60!black] (2.2, 2.75) -- (4.4, 2.75);
+  \node[font=\tiny, blue!60!black] at (3.5, 2.95) {peak FLOP/s};
+
+  % FP16 ridge
+  \draw[densely dashed, gray!70] (2.2,0) -- (2.2,2.75);
+  \node[font=\tiny, gray!80, below] at (2.2,-0.05) {\tiny FP16};
+
+  % INT4 ridge (shifted left — quantized weight BW rises)
+  \draw[densely dashed, orange!70!black] (1.2,0) -- (1.2,1.50);
+  \node[font=\tiny, orange!70!black, below] at (1.2,-0.05) {\tiny INT4};
+
+  % Decode operating point (memory-bound)
+  \fill[red!65!black] (0.65, 0.81) circle (2.5pt);
+  \node[font=\tiny, above right] at (0.65, 0.81) {decode};
+
+  % Prefill operating point (compute-bound)
+  \fill[green!55!black] (3.40, 2.75) circle (2.5pt);
+  \node[font=\tiny, below right] at (3.40, 2.75) {prefill};
+
+  \node[font=\small\bfseries] at (2.2, 3.25) {(a) Analytical roofline};
+\end{scope}
+
+%% ---- (b) Trained-roofline term decomposition ----
+\begin{scope}[xshift=5.4cm]
+  \node[font=\small\bfseries] at (1.9, 3.25) {(b) Trained-roofline: term breakdown};
+
+  % Axis
+  \draw[->] (0,0)   -- (0,3.0) node[above, font=\scriptsize] {};
+  \draw[->] (0,0)   -- (3.9,0) node[right, font=\scriptsize] {};
+
+  % Three batch columns: prefill-heavy, mixed, decode-heavy
+  \foreach \x/\lbl in {0.5/prefill-heavy, 1.9/mixed, 3.3/decode-heavy}{
+    \node[font=\tiny, below] at (\x, -0.05) {\lbl};
+  }
+
+  % Stacked bars: colours for each term
+  % Prefill-heavy: T_pf_comp dominates
+  \fill[blue!55]    (0.2, 0.00) rectangle (0.8, 1.70); % pf compute
+  \fill[green!45]   (0.2, 1.70) rectangle (0.8, 2.00); % weight
+  \fill[gray!40]    (0.2, 2.00) rectangle (0.8, 2.25); % fixed
+
+  % Mixed
+  \fill[blue!55]    (1.6, 0.00) rectangle (2.2, 0.90); % pf compute
+  \fill[red!45]     (1.6, 0.90) rectangle (2.2, 1.65); % dc kv
+  \fill[green!45]   (1.6, 1.65) rectangle (2.2, 2.00); % weight
+  \fill[gray!40]    (1.6, 2.00) rectangle (2.2, 2.25); % fixed
+
+  % Decode-heavy: T_dc_kv dominates
+  \fill[red!45]     (3.0, 0.00) rectangle (3.6, 1.80); % dc kv
+  \fill[green!45]   (3.0, 1.80) rectangle (3.6, 2.10); % weight
+  \fill[gray!40]    (3.0, 2.10) rectangle (3.6, 2.35); % fixed
+
+  % Legend
+  \fill[blue!55]  (0.0, 2.65) rectangle (0.25, 2.85);
+  \node[font=\tiny, right] at (0.28, 2.75) {$\beta_1 T^\text{pf}$ (prefill)};
+  \fill[red!45]   (0.0, 2.40) rectangle (0.25, 2.60);
+  \node[font=\tiny, right] at (0.28, 2.50) {$\beta_2 T^\text{dc}$ (decode)};
+  \fill[green!45] (2.0, 2.65) rectangle (2.25,2.85);
+  \node[font=\tiny, right] at (2.28, 2.75) {$\beta_3 T_\text{weight}$};
+  \fill[gray!40]  (2.0, 2.40) rectangle (2.25,2.60);
+  \node[font=\tiny, right] at (2.28, 2.50) {$\beta_5 L + \beta_6 B + \beta_7$};
+\end{scope}
+\end{tikzpicture}
+\caption{\textbf{Latency-model backends.}
+  (a)~The analytical roofline places prefill in the compute-bound regime
+  and decode in the memory-bandwidth-bound regime.
+  Quantization shifts the roofline ridge left (INT4 vs.\ FP16), reducing KV-cache
+  pressure and moving the decode point closer to the ridge.
+  (b)~The trained-roofline decomposes step time into four physically-motivated terms
+  whose relative contributions shift with batch composition.}
+\label{fig:latency-model}
+\end{figure}
+
+\subsubsection{The Analytical Roofline Model}
+\label{subsubsec:roofline}
+
+The roofline model bounds step time by the slower of compute throughput and memory
+bandwidth:
+\begin{equation}
+  T_\text{step} = \max\!\left(\frac{F}{\hat{P}_\text{flops}},\;\frac{M}{\hat{P}_\text{bw}}\right),
+  \label{eq:roofline}
+\end{equation}
+where $\hat{P}_\text{flops} = P_\text{flops} \times \mathrm{MFU}$ and
+$\hat{P}_\text{bw} = P_\text{bw}$ are the hardware's effective FLOP/s and byte/s
+throughput.
+BLIS computes $F$ from first principles for each batch: QKV projection, attention
+score computation, output projection, and MLP (two-matrix SwiGLU convention),
+with each term differentiated by whether tokens are in the prefill or decode phase.
+The memory term $M$ covers three sources: model weight bytes loaded once per step,
+KV-cache blocks written during prefill, and KV-cache blocks read and written during
+decode.
+
+The model uses \emph{phase-specific} MFU correction factors (\code{MfuPrefill},
+\code{MfuDecode}) because prefill and decode operate at fundamentally different
+arithmetic intensities (Figure~\ref{fig:latency-model}a).
+For quantized models, BLIS uses \code{EffectiveWeightBytesPerParam()}---auto-detected
+from HuggingFace quantization config, model-name conventions (e.g., \code{w4a16}
+$\rightarrow$ 0.5 bytes/param), or the \code{torch\_dtype} fallback---for the weight
+term while keeping the full-precision byte count for KV-cache and activation memory.
+This correctly shifts the roofline ridge for quantized models without requiring
+separate profiling.
+
+\subsubsection{The Trained-Roofline Model}
 \label{subsubsec:trained-roofline}
+
+The analytical roofline captures the right \emph{structure} but the wrong
+\emph{scale}: hardware non-idealities---NCCL synchronization, scheduler overhead,
+memory system effects---shift the contribution of each roofline term by a
+model-specific factor that no analytical formula predicts.
+The trained-roofline model promotes each term to a learnable basis function with a
+fitted scalar correction:
+\begin{equation}
+\boxed{
+  T_\text{step} =
+    \beta_1\max(T^\text{pf}_\text{comp},\,T^\text{pf}_\text{kv})
+  + \beta_2\max(T^\text{dc}_\text{comp},\,T^\text{dc}_\text{kv})
+  + \beta_3\,T_\text{weight}
+  + \beta_4\,T_\text{tp}
+  + \beta_5\,L
+  + \beta_6\,B
+  + \beta_7.
+}
+  \label{eq:trained-roofline}
+\end{equation}
+Each term has a precise physical interpretation.
+$T^\text{pf}_\text{comp}$ and $T^\text{pf}_\text{kv}$ are the prefill
+compute time and KV-write bandwidth time; their max captures the phase-level
+bottleneck.
+$T^\text{dc}_\text{comp}$ and $T^\text{dc}_\text{kv}$ are the analogous
+decode terms.
+$T_\text{weight}$ is the weight-loading time, amortized over the batch.
+$T_\text{tp} \approx 0$ on H100 NVLink (TP communication is absorbed into the
+per-layer overhead $\beta_5 L$).
+$B$ is the batch size.
+
+BLIS fits these seven coefficients from 13 vLLM experiments spanning four
+architectures (Llama-3, Qwen3, DeepSeek-MoE, Granite):
+\[
+  \bm{\beta} = [0.773,\;1.127,\;1.056,\;0.0,\;43.5\,\mu\text{s},\;48.8\,\mu\text{s},\;0.0].
+\]
+That $\beta_1$--$\beta_3$ are near 1.0 is not coincidental: the roofline basis
+captures the right physics, and the corrections are small rather than compensatory.
+Figure~\ref{fig:latency-model}b shows how term contributions shift across
+prefill-heavy, mixed, and decode-heavy batches.
+For MoE models, the weight term uses $n_\text{eff} = \min(N,\max(k,\,B{\cdot}k))$
+expert loads per step, modelling the routing fan-out without additional coefficients.
+
 \subsubsection{End-to-End Request Latency Decomposition}
 \label{subsubsec:e2e-decomp}
+
+End-to-end latency decomposes as
+\begin{equation}
+  \mathrm{E2E}(r) \;=\;
+  \underbrace{\alpha_0}_{\text{API overhead}}
+  + \sum_{s \,\in\, \mathrm{steps}(r)} T_s
+  + \underbrace{\alpha_1}_{\text{post-decode}}
+  + \underbrace{\alpha_2 \cdot y_r}_{\text{detokenization}},
+  \label{eq:e2e}
+\end{equation}
+where $y_r$ is the number of output tokens.
+TTFT is the time from arrival to the first decode step; TPOT is the mean
+inter-token interval during decode.
+For the trained-roofline backend, $\alpha_0$ is a constant API overhead (the
+prefill cost is already captured in step-time terms), $\alpha_1$ is a fixed
+post-decode cost, and $\alpha_2$ is the per-token detokenization latency.
+For the blackbox and cross-model backends, $\alpha_0$ grows linearly with
+input length, modelling the end-to-end queueing and KV-prefill overhead observed
+in trace data.
+
 \subsubsection{Training Pipeline}
 \label{subsubsec:training}
+
+\begin{sloppypar}
+BLIS fits the trained-roofline coefficients in three sequential phases using
+non-negative least squares (NNLS).
+Phase~1 isolates $\beta_3$ from batches where $T_\text{weight}$ dominates
+(zero prefill and decode tokens).
+Phase~2 fixes $\beta_3$ and fits $\beta_1$, $\beta_2$ from mixed batches that
+vary prefill-to-decode ratio.
+Phase~3 fits $\beta_5$, $\beta_6$, $\beta_7$ from the step-time residual.
+This three-phase structure exploits physical separability: earlier
+coefficients are not disturbed by later phases.
+Across 137{,}000 requests in 13 experiments, the trained-roofline achieves
+\textbf{7\% MAPE} (mean absolute percentage error) in step-time prediction.
+The physical grounding is also what makes the model data-efficient: 13 experiments
+across four architectures suffice because the basis functions are right.
+A purely data-driven polynomial fit requires far more data to generalize across
+held-out architectures, since its basis functions must be discovered rather than
+derived from physics.
+\end{sloppypar}
+
+% --------------------------------------------------------------------------
 \subsection{Pluggable Control-Plane Policies}
 \label{subsec:design-policies}
+
+The control plane of an LLM serving system is deterministic given its inputs:
+routing decisions, scheduling orders, and admission outcomes depend only on
+observable queue state, not on GPU execution.
+BLIS replicates each control-plane mechanism behind a single-method interface,
+making every policy independently swappable and testable.
+Faithful replication matters: a routing policy that silently ignores prefix
+affinity causes cache misses that inflate step times, conflating two distinct
+sources of error that must be diagnosed and corrected independently.
+
 \subsubsection{Admission Control}
 \label{subsubsec:admission}
+
+Admission fires at the cluster level before any instance sees a request.
+The \code{AdmissionPolicy} interface takes a request and the current cluster
+state (\code{RouterState}) and returns an admit/reject decision with a reason.
+BLIS ships two implementations: \textsc{AlwaysAdmit} (the default,
+suitable for overload-free regimes) and \textsc{TokenBucket} (rate-limiting
+with configurable capacity and refill rate, cost proportional to input-token
+count).
+Because rejection happens before routing, dropped requests never consume
+instance queue state, enabling clean overload experiments where the admission
+threshold is the variable under study.
+
 \subsubsection{Request Routing}
 \label{subsubsec:routing}
+
+\begin{sloppypar}
+BLIS supports four routing policies: \textsc{RoundRobin},
+\textsc{LeastLoaded}, \textsc{WeightedScoring}, and a pathological
+\textsc{AlwaysBusiest} baseline.
+The real contribution is the \emph{composable scorer framework} inside
+\textsc{WeightedScoring} (Figure~\ref{fig:scorer}).
+Pure load-balancing ignores prefix locality and incurs cold-cache misses on
+every step; pure affinity routing ignores load imbalance and overloads
+hot-prefix instances.
+The composable scorer resolves this tension: each scorer encodes one signal,
+and operators control the tradeoff with a weight vector.
+Each scorer maps every candidate instance to a score in $[0,1]$.
+The composite score is $\sum_i w_i \cdot s_i$ with normalised weights;
+the instance with the highest composite score is selected, with random
+tie-breaking for reproducibility.
+\end{sloppypar}
+
+BLIS provides four built-in scorers.
+\emph{prefix-affinity} scores by prefix-match ratio, using a router-side LRU
+index that tracks block hashes per instance---the router maintains a shadow of
+each instance's KV-cache topology without reading engine internals.
+\emph{queue-depth} uses min-max normalised effective load.
+\emph{kv-utilization} scores as $1 - \mathrm{KVUtil}$.
+\emph{load-balance} uses an inverse-load transform that preserves absolute
+load differences.
+The default profile \code{prefix-affinity:3,\,queue-depth:2,\,kv-utilization:2}
+matches the llm-d endpoint picker~\cite{llmd2024}, enabling direct sim-to-real
+comparison without re-tuning weights.
+
+% ---- Figure C: Composable Scorer Framework ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  inst/.style={draw, rounded corners=3pt, fill=gray!8,
+               minimum width=1.55cm, minimum height=0.45cm,
+               align=center, font=\footnotesize},
+  arr/.style={->, >=Stealth, semithick},
+  lbl/.style={font=\tiny},
+]
+% Three instances across the top
+\foreach \i/\x in {1/0.0, 2/2.2, 3/4.4}{
+  \node[inst] (I\i) at (\x, 2.8) {Instance$_\i$};
+}
+
+% Stacked score bars for each instance
+% Colours: blue=prefix-affinity, orange=queue-depth, teal=kv-util
+\foreach \x/\pa/\qd/\kv in {0.0/1.40/0.70/0.45, 2.2/0.30/1.05/0.85, 4.4/0.85/0.60/0.60}{
+  \pgfmathsetmacro{\base}{0.0}
+  \fill[blue!50]   (\x-0.55, \base)           rectangle (\x+0.55, \base+\pa);
+  \fill[orange!60] (\x-0.55, \base+\pa)       rectangle (\x+0.55, \base+\pa+\qd);
+  \fill[teal!50]   (\x-0.55, \base+\pa+\qd)   rectangle (\x+0.55, \base+\pa+\qd+\kv);
+  \draw            (\x-0.55, 0) rectangle (\x+0.55, \base+\pa+\qd+\kv);
+}
+
+% Score axis label
+\draw[->] (-0.85,0) -- (-0.85, 2.75) node[above, font=\tiny] {score};
+\foreach \y in {0,0.5,1.0,1.5,2.0,2.5}{
+  \draw[gray!40] (-0.90,\y) -- (5.0,\y);
+}
+
+% Argmax marker
+\draw[arr, red!70!black, very thick] (0.0, 2.60) -- (0.0, 2.82);
+\node[font=\tiny, red!70!black, above] at (0.0, 2.82) {\textbf{selected}};
+
+% Legend — weights shown next to each scorer name
+\fill[blue!50]   (5.4, 2.4) rectangle (5.7, 2.6);
+\node[font=\tiny, right] at (5.72, 2.50) {prefix-affinity\ ($w{=}3$)};
+\fill[orange!60] (5.4, 2.1) rectangle (5.7, 2.3);
+\node[font=\tiny, right] at (5.72, 2.20) {queue-depth\ ($w{=}2$)};
+\fill[teal!50]   (5.4, 1.8) rectangle (5.7, 2.0);
+\node[font=\tiny, right] at (5.72, 1.90) {kv-utilization\ ($w{=}2$)};
+
+% Composite formula note
+\node[font=\tiny, gray, align=center] at (2.2, -0.45)
+      {composite $= \textstyle\sum_i w_i \cdot s_i$,\enspace $s_i \in [0,1]$};
+\end{tikzpicture}
+\caption{\textbf{Composable scorer framework.}
+  Three scorers evaluate all candidate instances independently on $[0,1]$.
+  Weighted combination selects Instance$_1$ here because its high prefix-affinity
+  score (large blue bar) outweighs lower load-balance scores.
+  The default weights (pa:3, qd:2, kv:2) match the llm-d endpoint picker,
+  enabling direct sim-to-real comparison.
+  New scorers plug in by implementing a single-method interface.}
+\label{fig:scorer}
+\end{figure}
+
 \subsubsection{Instance Scheduling and Batch Formation}
 \label{subsubsec:scheduling}
+
+Inside each instance, \code{InstanceScheduler} re-orders the wait queue before
+every step.
+BLIS provides three meaningful scheduling policies: \textsc{FCFS} (default),
+\textsc{PriorityFCFS} (sort by SLO class then arrival time), and
+\textsc{SJF} (sort by input-token count).
+Priority values come from a separate \code{PriorityPolicy}; the
+\textsc{SLOBased} variant uses $\text{base} + w_\text{age} \times \text{wait}$,
+where the aging term prevents starvation across SLO classes.
+
+Batch formation replicates vLLM's continuous batching with chunked prefill and
+preemption.
+Phase~1 processes continuing requests: long prompts are chunked to
+\code{LongPrefillTokenThreshold} tokens per step, and decode tokens fill the
+remainder of the \code{MaxScheduledTokens} budget.
+Phase~2 admits new requests from the wait queue, allocating KV blocks and
+looking up prefix-cached blocks.
+If KV allocation fails during Phase~1, the formation preempts from the batch
+tail---preserving earlier blocks that more requests may share---until memory
+is available or the batch reaches size one.
+This two-phase algorithm is the same structure used in production vLLM, ensuring
+that BLIS batch dynamics match real deployments.
+
 \subsubsection{KV Cache and Memory Tiering}
 \label{subsubsec:kvcache}
+
+BLIS models KV-cache pressure at block granularity.
+The single-tier GPU cache maintains an O(1) LRU free list and a hash-to-block
+index for prefix reuse.
+Block hashes use a hierarchical SHA-256 chain: each block's hash includes the
+previous block's hash, so the prefix-match lookup costs $O(K \cdot B_\text{sz})$
+rather than $O(K^2 \cdot B_\text{sz})$, where $K$ is the cached-prefix length
+in blocks and $B_\text{sz}$ is the block size.
+A failed allocation rolls back atomically---restoring the free list, hash index,
+and block states---so the batch formation can retry or preempt without leaving
+the cache in an inconsistent state.
+
+The tiered GPU\,+\,CPU backend (\code{TieredKVCache}) composes the GPU tier with
+a CPU LRU mirror (Figure~\ref{fig:tiered-kv}).
+After each batch step, \code{MirrorToCPU} copies every completed full block's
+hash and token data to the CPU---lazy mirroring rather than eviction-triggered
+transfer.
+When GPU allocation fails on a cache miss, \code{reloadPrefixFromCPU} walks the
+prefix hash chain, pops a GPU free block for each CPU hit, and accumulates a PCIe
+transfer stall of $t_\text{base} + \lceil B_\text{sz} / \text{BW}_\text{PCIe} \rceil$
+per reloaded block.
+The stall is injected into the next step via \code{ConsumePendingTransferLatency},
+modelling the real system's PCIe serialisation without cycle-accurate simulation.
+KV capacity is computed analytically: total GPU memory minus model weights
+(three-matrix SwiGLU, consistent with the trained-roofline convention),
+activation memory, and non-torch overhead, divided by bytes-per-block at the
+configured precision.
+
+% ---- Figure D: Tiered KV Cache ----
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  mem/.style={draw, rounded corners=3pt, minimum height=0.80cm,
+              minimum width=5.6cm, align=center, font=\small},
+  blk/.style={draw, minimum width=0.62cm, minimum height=0.62cm,
+              font=\tiny, align=center},
+  arr/.style={->, >=Stealth, semithick},
+]
+%% GPU tier — raised to y=2.7 to open up the inter-tier gap
+\node[mem, fill=blue!8]  (gpu) at (0, 2.7) {};
+\node[font=\small\bfseries, blue!60!black, left=0.1cm] at (gpu.west) {GPU VRAM};
+
+\foreach \i/\col/\lab in {
+  1/blue!25/{A}, 2/blue!25/{B}, 3/orange!30/{C},
+  4/green!25/{D}, 5/gray!20/{free}, 6/gray!20/{free}}{
+  \node[blk, fill=\col] at (-2.1 + \i*0.75, 2.7) {\lab};
+}
+
+%% CPU tier at y=0.5
+\node[mem, fill=orange!6] (cpu) at (0, 0.5) {};
+\node[font=\small\bfseries, orange!70!black, left=0.1cm] at (cpu.west) {CPU DRAM};
+
+\foreach \i/\col/\lab in {
+  1/blue!15/{A}, 2/blue!15/{B}, 3/green!15/{D},
+  4/gray!15/{E}, 5/gray!15/{F}, 6/gray!15/{G}}{
+  \node[blk, fill=\col] at (-2.1 + \i*0.75, 0.5) {\lab};
+}
+
+%% Inter-tier gap: GPU bottom = 2.30, CPU top = 0.90
+%% Arrows to the right of all named blocks (x > 2.71)
+\draw[arr, blue!55!black]   (3.4, 2.30) -- (3.4, 0.90)
+    node[midway, right, font=\tiny, blue!55!black] {lazy mirror};
+
+\draw[arr, dashed, orange!65!black] (3.0, 0.90) -- (3.0, 2.30)
+    node[midway, right, font=\tiny, orange!65!black] {reload on miss};
+
+%% PCIe stall — below CPU box (CPU box bottom = 0.10)
+\node[draw=orange!50, rounded corners=2pt, fill=orange!5,
+      font=\tiny, align=center, inner sep=2pt]
+     at (3.2, -0.28) {PCIe: $t_\text{base}+\lceil B_\text{sz}/\mathrm{BW}\rceil$\\per block};
+\draw[->, very thin, dashed, orange!45!black] (3.2, -0.08) -- (3.2, 0.87);
+\end{tikzpicture}
+\caption{\textbf{Tiered KV cache.}
+  After each step, BLIS lazily mirrors newly completed blocks from GPU to CPU DRAM.
+  On a GPU miss, matching CPU blocks reload to GPU and accumulate a PCIe transfer
+  stall injected into the next step's execution time.
+  Orange block~C is on GPU but not yet mirrored; green block~D has been mirrored to both tiers.}
+\label{fig:tiered-kv}
+\end{figure}
+
+% --------------------------------------------------------------------------
 \subsection{Composable Workload Models}
 \label{subsec:design-workloads}
+
+Workload fidelity matters as much as execution-physics accuracy: a simulator fed
+a naive Poisson stream with fixed token lengths will predict a deployment that
+no real workload ever produces.
+ServeGen~\cite{xiang2025servegen} shows that per-client compositional generation
+avoids the 50\% under-provisioning errors of aggregate workload generation;
+BLIS's workload model follows the same per-client structure.
+
+A \code{WorkloadSpec} organises parameters at three levels.
+At the \emph{cluster level}: aggregate request rate, simulation horizon, and RNG seed.
+At the \emph{client level}: each client specifies an arrival process (four
+families, from Poisson to heavy-tailed Weibull), token-length distributions
+(five families, including an empirical type that replays a ServeGen trace with
+zero re-parameterisation~\cite{xiang2025servegen}), SLO class, prefix group,
+and session mode (open-loop or closed-loop with configurable think time).
+At the \emph{cohort level}: population dynamics---diurnal scaling, traffic spikes,
+client drain---produce the bursty, non-stationary arrival patterns observed in
+production.
+For closed-loop sessions the generator emits only round-0 requests at
+initialisation; subsequent rounds are generated at runtime as completions arrive,
+preserving the causal dependency between turns.
+
+% --------------------------------------------------------------------------
 \subsection{Metrics and Fitness Evaluation}
 \label{subsec:design-metrics}
+
+BLIS measures three per-request latency quantities operators care about:
+\emph{time to first token} (TTFT), \emph{time per output token} (TPOT), and
+\emph{end-to-end latency} (E2E, Equation~\ref{eq:e2e}).
+For each, it reports the full empirical distribution and its percentiles (p50,
+p95, p99), along with per-SLO-class breakdowns, aggregate throughput (tokens/s
+and requests/s), and KV-cache hit rate.
+
+For algorithm evolution (\S\ref{sec:eval-evolution}), BLIS exposes a scalar
+fitness function:
+\begin{equation}
+  \mathcal{F}(\pi,\,\mathcal{W}) \;=\; -\,\mathrm{p95}(\mathrm{E2E})
+  \quad\text{s.t.}\quad
+  \mathrm{p99}(\mathrm{TTFT}) \;\leq\; T_\mathrm{slo},
+  \label{eq:fitness}
+\end{equation}
+The objective minimises p95(E2E)---the experience of the slowest one-in-twenty
+users---while the constraint prevents the optimizer from sacrificing first-token
+responsiveness for throughput.
+$\pi$ is a policy configuration (routing weights, scheduling policy,
+admission threshold) and $\mathcal{W}$ is a workload scenario.
+A single simulation evaluates $\mathcal{F}$ in under two seconds on a laptop CPU,
+making 1{,}000-candidate evolutionary search feasible in under 30 minutes---orders
+of magnitude faster than real-hardware evaluation, which requires minutes of GPU
+time per configuration.
 
 % ============================================================
 % SECTION 5: SIM-TO-REAL METHODOLOGY
